@@ -25,11 +25,11 @@ def test_prefix_aliases_and_unknown_lines(pure_functions):
 
 def test_parse_list_current_behavior(pure_functions, fixture_text):
     assert pure_functions("bot.py")["parse_user_names"](fixture_text("cli_list.txt")) == [
-        "demo", "client_1234567890", "disabled_demo", "expired_demo",
+        "demo", "client_1234567890", "client_12345678901",
+        "n" * 32, "n" * 64, "disabled_demo", "expired_demo",
     ]
 
 
-@pytest.mark.xfail(strict=True, reason="Known parser bug for 18+ char client names")
 def test_exactly_18_character_name_is_visible(pure_functions, fixture_text):
     name = "client_12345678901"
     assert len(name) == 18

@@ -1,9 +1,12 @@
-"""Text fixtures only: importing the CLI reads production configuration.
+"""Importing the CLI reads production configuration, so load functions via AST.
 
-No CLI process or module is executed. Update fixtures deliberately if the
-formatter's prefixes or column widths change in a later migration.
+cmd_list runs only against in-memory doubles, never XUI or a subprocess.
 """
+import re
+from types import SimpleNamespace
 from urllib.parse import urlparse
+
+import pytest
 
 
 def test_info_fixture_contract(fixture_text):
@@ -21,8 +24,8 @@ def test_list_column_boundary(fixture_text):
     lines = fixture_text("cli_list.txt").splitlines()
     name17, name18 = "client_1234567890", "client_12345678901"
     assert len(name17) == 17 and len(name18) == 18
-    assert any(line.startswith(name17 + " 🟢") for line in lines)
-    assert any(line.startswith(name18 + "🟢") for line in lines)
+    assert any(re.match(re.escape(name17) + r"\s{2,}🟢", line) for line in lines)
+    assert any(re.match(re.escape(name18) + r"\s{2,}🟢", line) for line in lines)
     assert any(line.startswith("disabled_demo") and "🔴 Отключён" in line for line in lines)
     assert any(line.startswith("expired_demo") and "🟠 Истёк" in line for line in lines)
 
@@ -32,3 +35,29 @@ def test_expiring_cli_suffix(fixture_text):
             if line.startswith("demo_")]
     assert len(rows) == 4
     assert all(line.endswith(" дн.") and "осталось " in line for line in rows)
+
+
+@pytest.mark.parametrize("length", [2, 4, 17, 18, 32, 64])
+def test_real_list_formatter_round_trips_to_bot(length, source_functions, pure_functions, capsys):
+    name = "n" * length
+    functions = source_functions(
+        "karina_user.py", {"cmd_list"},
+        XUI=lambda: SimpleNamespace(login=lambda: None),
+        collect_client_names=lambda api: [name],
+        get_client_full=lambda api, email: {
+            "obj": {"usedTraffic": 0},
+            "client": {"limitHwid": 2, "totalGB": 0, "expiryTime": 0},
+            "devices": ["synthetic_device"],
+        },
+        get_status=lambda client: "🟢 Активен",
+        bytes_to_human=lambda value: "500 МБ",
+        bytes_to_gb=lambda value: "∞",
+        fmt_date_short=lambda value: "01.10.2030",
+    )
+    functions["cmd_list"]([])
+    output = capsys.readouterr().out
+    row = next(line for line in output.splitlines() if line.startswith(name))
+    assert re.split(r"\s{2,}", row.strip()) == [
+        name, "🟢 Активен", "1/2", "500 МБ", "∞", "01.10.2030",
+    ]
+    assert pure_functions("bot.py")["parse_user_names"](output) == [name]

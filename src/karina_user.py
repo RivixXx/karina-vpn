@@ -726,15 +726,15 @@ def cmd_list(args):
         return
 
     print(
-        f"{'Имя':<18}"
-        f"{'Статус':<17}"
-        f"{'HWID':<9}"
-        f"{'Трафик':<14}"
-        f"{'Лимит':<12}"
+        f"{'Имя':<18}  "
+        f"{'Статус':<17}  "
+        f"{'HWID':<9}  "
+        f"{'Трафик':<14}  "
+        f"{'Лимит':<12}  "
         f"{'До':<12}"
     )
 
-    print("─" * 82)
+    print("─" * 92)
 
     active = 0
     expired = 0
@@ -751,11 +751,11 @@ def cmd_list(args):
             disabled += 1
 
         print(
-            f"{row['email']:<18}"
-            f"{status:<17}"
-            f"{row['devices']:<9}"
-            f"{row['used']:<14}"
-            f"{row['limit']:<12}"
+            f"{row['email']:<18}  "
+            f"{status:<17}  "
+            f"{row['devices']:<9}  "
+            f"{row['used']:<14}  "
+            f"{row['limit']:<12}  "
             f"{row['expiry']:<12}"
         )
 

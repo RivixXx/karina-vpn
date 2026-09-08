@@ -3,6 +3,7 @@ import secrets
 import sqlite3
 import subprocess
 import time
+from contextlib import closing
 from pathlib import Path
 
 from telegram import (
@@ -110,6 +111,16 @@ def get_link_by_email(email):
             """,
             (email,),
         ).fetchone()
+
+
+def delete_client_local_state(email):
+    """Revoke local access after confirmed XUI deletion; preserve audit history.
+
+    No Telegram delete flow exists yet, so integration is intentionally pending.
+    """
+    with closing(db_connect()) as db, db:
+        db.execute("DELETE FROM telegram_links WHERE email = ?", (email,))
+        db.execute("DELETE FROM bind_tokens WHERE email = ?", (email,))
 
 
 def create_bind_token(email):

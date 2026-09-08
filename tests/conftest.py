@@ -5,10 +5,12 @@ import re
 import socket
 import sqlite3
 import subprocess
+from contextlib import closing
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+SQLITE_CONNECT = sqlite3.connect
 ALLOWED = {
     "bot.py": {"extract_info", "parse_user_names", "esc"},
     "notifier.py": {"parse_expiring", "notification_stage"},
@@ -35,17 +37,52 @@ def fixture_text():
 
 
 @pytest.fixture
-def pure_functions():
-    def load(filename):
+def source_functions():
+    def load(filename, names, **dependencies):
         tree = ast.parse((ROOT / "src" / filename).read_text(encoding="utf-8"))
         nodes = [node for node in tree.body
-                 if isinstance(node, ast.FunctionDef) and node.name in ALLOWED[filename]]
-        assert {node.name for node in nodes} == ALLOWED[filename]
+                 if isinstance(node, ast.FunctionDef) and node.name in names]
+        assert {node.name for node in nodes} == set(names)
         # No imports, assignments, decorators or default expressions are executed.
         for node in nodes:
             assert not node.decorator_list
             assert not node.args.defaults and not any(node.args.kw_defaults)
-        namespace = {"re": re}
+        namespace = {"re": re, **dependencies}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), namespace)
         return namespace
     return load
+
+
+@pytest.fixture
+def pure_functions(source_functions):
+    return lambda filename: source_functions(filename, ALLOWED[filename])
+
+
+@pytest.fixture
+def local_db(tmp_path, source_functions):
+    # Only this factory bypasses the global SQLite guard, at this exact tmp_path.
+    database = tmp_path / "synthetic.sqlite"
+
+    def connect():
+        return SQLITE_CONNECT(database)
+
+    for filename, name, dependency in (
+        ("bot.py", "init_db", "db_connect"),
+        ("notifier.py", "init_db", "db_connect"),
+        ("billing.py", "init_billing", "connect"),
+    ):
+        source_functions(filename, {name}, **{dependency: connect})[name]()
+
+    with closing(connect()) as db, db:
+        for email, tg_id in (("demo_target", 1), ("demo_other", 2)):
+            db.execute("INSERT INTO telegram_links VALUES (?, ?, '', '', 0)", (tg_id, email))
+            db.executemany("INSERT INTO bind_tokens VALUES (?, ?, 0, 4102444800, 0)",
+                           [(email + "_token_a", email), (email + "_token_b", email)])
+            db.execute("INSERT INTO notifications_sent "
+                       "(email, expiry_key, notification_day, sent_at) VALUES (?, 'fixture', 7, 0)",
+                       (email,))
+            db.execute("INSERT INTO orders "
+                       "(order_id, tg_id, email, plan_id, plan_title, days, amount, created_at) "
+                       "VALUES (?, ?, ?, 'fixture', 'Synthetic plan', 30, 1, 0)",
+                       (email + "_order", tg_id, email))
+    return connect
