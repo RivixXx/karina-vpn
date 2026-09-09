@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 set -Eeuo pipefail
 
 [[ $# -eq 1 ]] || { echo "usage: $0 <git-ref>" >&2; exit 2; }

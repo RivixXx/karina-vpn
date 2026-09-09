@@ -1,13 +1,54 @@
 from pathlib import Path
+import os
 import re
+import shutil
+import subprocess
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+ORIGINAL_POPEN = subprocess.Popen
 
 
 def source(name):
     return (SCRIPTS / name).read_text(encoding="utf-8")
+
+
+def run_local(command):
+    process = ORIGINAL_POPEN(
+        command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    stdout, stderr = process.communicate()
+    assert process.returncode == 0, stderr or stdout
+    return stdout
+
+
+def test_deployment_text_assets_have_no_utf8_bom():
+    assets = [ROOT / "README.md", ROOT / "requirements.txt"]
+    assets.extend(path for path in (ROOT / "deploy").rglob("*") if path.is_file())
+    assets.extend(SCRIPTS.glob("*.sh"))
+    assert assets
+    assert all(not path.read_bytes().startswith(b"\xef\xbb\xbf") for path in assets)
+
+
+def test_shell_scripts_have_shebang_executable_git_mode_and_valid_syntax():
+    scripts = sorted(SCRIPTS.glob("*.sh"))
+    assert scripts and all(path.read_bytes().startswith(b"#!") for path in scripts)
+
+    modes = {
+        line.split(maxsplit=3)[3]: line.split(maxsplit=1)[0]
+        for line in run_local(["git", "ls-files", "--stage", "--", "scripts"]).splitlines()
+    }
+    assert modes == {path.relative_to(ROOT).as_posix(): "100755" for path in scripts}
+
+    if os.name == "nt":
+        bash = Path(os.environ["ProgramFiles"]) / "Git" / "bin" / "bash.exe"
+        assert bash.is_file()
+        executable = str(bash)
+    else:
+        executable = shutil.which("bash")
+        assert executable
+    run_local([executable, "-n", *[path.relative_to(ROOT).as_posix() for path in scripts]])
 
 
 def test_runtime_requirements_are_minimal_and_exclude_pytest():

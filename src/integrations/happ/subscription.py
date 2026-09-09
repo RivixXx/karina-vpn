@@ -1,4 +1,4 @@
-﻿"""Compatibility import for the former Happ/Crypt5 issuer module."""
+"""Compatibility import for the former Happ/Crypt5 issuer module."""
 
 from ..subscription import SubscriptionIssuerError, issue_subscription
 
