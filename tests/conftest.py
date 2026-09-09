@@ -41,12 +41,17 @@ def source_functions():
     def load(filename, names, **dependencies):
         tree = ast.parse((ROOT / "src" / filename).read_text(encoding="utf-8"))
         nodes = [node for node in tree.body
-                 if isinstance(node, ast.FunctionDef) and node.name in names]
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
         assert {node.name for node in nodes} == set(names)
         # No imports, assignments, decorators or default expressions are executed.
         for node in nodes:
             assert not node.decorator_list
-            assert not node.args.defaults and not any(node.args.kw_defaults)
+            assert all(isinstance(value, ast.Constant) for value in node.args.defaults)
+            assert not any(node.args.kw_defaults)
+            # Annotations are documentation only; do not import Telegram types.
+            node.returns = None
+            for arg in node.args.args + node.args.kwonlyargs:
+                arg.annotation = None
         namespace = {"re": re, **dependencies}
         exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), namespace)
         return namespace

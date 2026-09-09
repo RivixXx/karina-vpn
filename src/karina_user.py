@@ -14,6 +14,7 @@ from http.cookiejar import CookieJar
 from pathlib import Path
 
 CONFIG = Path("/etc/karina-vpn/config.env")
+CONNECT_DIR = Path("/var/www/karina/connect")
 
 
 def die(message, code=1):
@@ -1301,25 +1302,40 @@ def cmd_enable(args):
     print(f"{email}: включён")
 
 
-def cmd_delete(args):
-    if len(args) != 1:
-        die(
-            "использование: "
-            "karina-user delete ИМЯ"
-        )
-
-    email = normalize_email(args[0])
-
+def delete_client_impl(email):
     api = XUI()
     api.login()
-
     obj = api.get_client(email)
-
     if not obj:
         die(f"клиент {email} не найден")
+    sub_id = obj["client"].get("subId")
+    api.delete_client(email)
+    warnings = []
+    if not isinstance(sub_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", sub_id):
+        return {"vpn_deleted": True, "warnings": ["Invalid subId; file cleanup skipped"]}
+    try:
+        connect_dir = CONNECT_DIR.resolve()
+        for suffix in (".html", ".png", ".crypt5"):
+            path = connect_dir / f"{sub_id}{suffix}"
+            try:
+                resolved = path.resolve()
+                if not resolved.is_relative_to(connect_dir):
+                    warnings.append(f"Unsafe {suffix} path; cleanup skipped")
+                    continue
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except (OSError, RuntimeError) as exc:
+                warnings.append(f"File cleanup failed ({suffix}): {type(exc).__name__}")
+    except (OSError, RuntimeError) as exc:
+        warnings.append(f"Connect directory unavailable: {type(exc).__name__}")
+    return {"vpn_deleted": True, "warnings": warnings}
 
-    sub_id = obj["client"]["subId"]
 
+def cmd_delete(args):
+    if len(args) != 1:
+        die("использование: karina-user delete ИМЯ")
+    email = normalize_email(args[0])
     confirm = input(
         f"Удалить клиента {email} "
         f"полностью? Напиши YES: "
@@ -1329,28 +1345,18 @@ def cmd_delete(args):
         print("Отменено.")
         return
 
-    api.delete_client(email)
-
-    connect_dir = Path(
-        "/var/www/karina/connect"
-    )
-
-    for suffix in (
-        ".html",
-        ".png",
-        ".crypt5",
-    ):
-        path = (
-            connect_dir
-            / f"{sub_id}{suffix}"
-        )
-
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            pass
-
+    result = delete_client_impl(email)
     print(f"{email}: удалён")
+    for warning in result["warnings"]:
+        print(f"Warning: {warning}", file=sys.stderr)
+
+
+def cmd_delete_confirmed(args):
+    """Trusted local caller only; stdout is a machine-readable deletion result."""
+    if len(args) != 1:
+        die("usage: karina-user delete-confirmed EMAIL")
+    result = delete_client_impl(normalize_email(args[0]))
+    print(json.dumps(result))
 
 
 def usage():
@@ -1424,6 +1430,7 @@ def main():
         "disable": cmd_disable,
         "enable": cmd_enable,
         "delete": cmd_delete,
+        "delete-confirmed": cmd_delete_confirmed,
     }
 
     handler = commands.get(command)

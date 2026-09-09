@@ -40,16 +40,28 @@ Focused fixes:
 
 - CLI list columns now have explicit two-space separators, including for
   names of 18, 32 and 64 characters. The bot parser needs no regex changes.
-- `delete_client_local_state(email)` atomically removes Telegram bindings and
-  bind tokens while retaining notifications and orders. Telegram has no delete
-  flow yet, so this helper is not called automatically. CLI deletion still
-  leaves local access records; integration is a separate task.
+- `client_refs` maps persistent integer IDs to client names. Startup creates
+  the table if missing, preserving existing data. Admin callbacks contain only
+  an action and ref ID; old email-based buttons require reopening the list.
+- Admin deletion requires confirmation in a private chat. The bot verifies the
+  client, calls `delete-confirmed`, then atomically removes the Telegram binding,
+  bind tokens and ref. Notifications and orders are retained. XUI failure leaves
+  local access intact. Cancellation invalidates the confirmation.
+- `delete` retains the YES prompt. Trusted internal `delete-confirmed` uses the
+  same deletion function, without stdin. Its stdout is JSON with `vpn_deleted`
+  and `warnings`. File cleanup warnings do not turn successful VPN deletion
+  into failure. Bot and CLI must be deployed together for this contract.
+- File cleanup validates subId and resolved paths before unlinking. Invalid
+  IDs and paths outside the connect directory are skipped with warnings.
+- `/start` and callbacks reject non-private chats before looking up client data.
 
 Known limitations:
 
-- Admin callbacks still embed client names and can exceed Telegram's 64-byte
-  callback limit for long names. The formatter/parser regression tests do not
-  cover delivery of Telegram keyboards; callback identifiers need a separate fix.
+- XUI and SQLite cannot share a transaction. If SQLite cleanup fails after VPN
+  deletion, the UI offers a local-only retry in the current bot process. A bot
+  restart or lost backend response in this interval requires reconciliation;
+  deletion progress is not persisted. Direct CLI deletion still has no access
+  to Telegram DB and must not be used as a substitute for the admin flow.
 - `extract_info` recognizes only its hardcoded production URL prefix; the
   anonymized `example.test` fixture intentionally yields no `url` field.
 - Other security and billing findings from the audit remain unresolved.

@@ -1,4 +1,5 @@
 import re
+import json
 import secrets
 import sqlite3
 import subprocess
@@ -11,7 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Update,
 )
-from telegram.constants import ParseMode
+from telegram.constants import ChatType, ParseMode
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -85,6 +86,12 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_links_email
                 ON telegram_links(email);
+
+            CREATE TABLE IF NOT EXISTS client_refs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL
+            );
             """
         )
 
@@ -113,14 +120,47 @@ def get_link_by_email(email):
         ).fetchone()
 
 
-def delete_client_local_state(email):
-    """Revoke local access after confirmed XUI deletion; preserve audit history.
+def delete_client_local_state(email, db=None):
+    """Revoke access; an existing transaction may include ref deletion."""
+    if db is None:
+        with closing(db_connect()) as connection, connection:
+            delete_client_local_state(email, connection)
+        return
+    db.execute("DELETE FROM telegram_links WHERE email = ?", (email,))
+    db.execute("DELETE FROM bind_tokens WHERE email = ?", (email,))
 
-    No Telegram delete flow exists yet, so integration is intentionally pending.
-    """
+
+def get_or_create_client_ref(email):
     with closing(db_connect()) as db, db:
-        db.execute("DELETE FROM telegram_links WHERE email = ?", (email,))
-        db.execute("DELETE FROM bind_tokens WHERE email = ?", (email,))
+        db.execute("INSERT OR IGNORE INTO client_refs (email, created_at) VALUES (?, ?)",
+                   (email, int(time.time())))
+        return db.execute("SELECT id FROM client_refs WHERE email = ?", (email,)).fetchone()[0]
+
+
+def get_client_email_by_ref(ref_id):
+    if type(ref_id) is not int or not 0 < ref_id <= 9223372036854775807:
+        return None
+    with closing(db_connect()) as db:
+        row = db.execute("SELECT email FROM client_refs WHERE id = ?", (ref_id,)).fetchone()
+        return row[0] if row else None
+
+
+def delete_client_ref(email, db=None):
+    if db is None:
+        with closing(db_connect()) as connection, connection:
+            delete_client_ref(email, connection)
+        return
+    db.execute("DELETE FROM client_refs WHERE email = ?", (email,))
+
+
+def client_callback(action, email):
+    if action not in {"u", "ub", "ud", "uc", "udel", "uy"}:
+        raise ValueError("Unknown client action")
+    return f"{action}:{get_or_create_client_ref(email)}"
+
+
+def is_private_chat(update):
+    return bool(update.effective_chat and update.effective_chat.type == ChatType.PRIVATE)
 
 
 def create_bind_token(email):
@@ -691,7 +731,7 @@ async def admin_users(update):
             [
                 InlineKeyboardButton(
                     f"{icon} {email}",
-                    callback_data=f"admin_user:{email}",
+                    callback_data=client_callback("u", email),
                 )
             ]
         )
@@ -741,14 +781,14 @@ async def admin_user(update, email):
 
         bind_button = InlineKeyboardButton(
             "🔄 Перепривязать Telegram",
-            callback_data=f"admin_bind:{email}",
+            callback_data=client_callback("ub", email),
         )
     else:
         telegram_text = "⚪ Telegram: не привязан"
 
         bind_button = InlineKeyboardButton(
             "🔗 Привязать Telegram",
-            callback_data=f"admin_bind:{email}",
+            callback_data=client_callback("ub", email),
         )
 
     text = (
@@ -768,12 +808,18 @@ async def admin_user(update, email):
             [
                 InlineKeyboardButton(
                     "📱 Устройства",
-                    callback_data=f"admin_devices:{email}",
+                    callback_data=client_callback("ud", email),
                 ),
                 InlineKeyboardButton(
                     "🔗 Подключение",
-                    callback_data=f"admin_connect:{email}",
+                    callback_data=client_callback("uc", email),
                 ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 Удалить",
+                    callback_data=client_callback("udel", email),
+                )
             ],
             [
                 InlineKeyboardButton(
@@ -789,6 +835,93 @@ async def admin_user(update, email):
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+
+
+async def admin_ref_callback(update, context, data):
+    if not is_private_chat(update) or not is_admin(update):
+        return
+    query = update.callback_query
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Пользователи", callback_data="admin_users")]])
+    match = re.fullmatch(r"(u|ub|ud|uc|udel|uy):([1-9][0-9]{0,18})", data)
+    email = get_client_email_by_ref(int(match[2])) if match else None
+    if email is None:
+        await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
+        return
+    action, ref_id = match[1], int(match[2])
+    # Keep a successful backend result for retry if SQLite cleanup fails.
+    pending = context.user_data.get("deleted_vpn")
+    retry_cleanup = action == "uy" and pending and pending["ref"] == ref_id
+    if not retry_cleanup:
+        code, output = run_karina(["info", email])
+        if code != 0:
+            text = ("Пользователь больше не существует" if f"клиент {email} не найден" in output
+                    else "Не удалось проверить пользователя. Попробуйте ещё раз.")
+            await query.edit_message_text(text, reply_markup=back)
+            return
+    if action == "u":
+        await admin_user(update, email)
+    elif action == "ub":
+        await create_bind_link(update, context, email)
+    elif action in {"ud", "uc"}:
+        rows = [[InlineKeyboardButton("⬅️ Профиль", callback_data=f"u:{ref_id}")]]
+        if action == "ud":
+            code, output = run_karina(["devices", email])
+            text = output if code == 0 else "Не удалось получить устройства. Попробуйте ещё раз."
+        else:
+            url = extract_info(output).get("url")
+            if url:
+                rows.insert(0, [InlineKeyboardButton("💗 Подключить Карина VPN", url=url)])
+            text = "🔗 Подключение"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+    elif action == "udel":
+        context.user_data["delete_confirmation"] = ref_id
+        await query.edit_message_text(
+            f"⚠️ Удалить пользователя {email}?\n\n"
+            "Будут удалены:\n• VPN-клиент\n• ссылка подключения\n"
+            "• Telegram-привязка\n• активные ссылки привязки\n\n"
+            "История уведомлений и заказов сохранится.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Да, удалить", callback_data=f"uy:{ref_id}")],
+                [InlineKeyboardButton("Отмена", callback_data=f"u:{ref_id}")],
+            ]),
+        )
+    elif action == "uy":
+        if not retry_cleanup:
+            if context.user_data.get("delete_confirmation") != ref_id:
+                await query.edit_message_text("Подтвердите удаление в профиле пользователя.", reply_markup=back)
+                return
+            code, output = run_karina(["delete-confirmed", email])
+            if code != 0:
+                await query.edit_message_text("Не удалось удалить VPN-клиента. Можно повторить из профиля.",
+                                              reply_markup=InlineKeyboardMarkup([
+                                                  [InlineKeyboardButton("⬅️ Профиль", callback_data=f"u:{ref_id}")]]))
+                return
+            try:
+                result = json.loads(output)
+                if result.get("vpn_deleted") is not True or not isinstance(result.get("warnings"), list):
+                    raise ValueError("Unexpected backend response")
+            except (ValueError, AttributeError):
+                await query.edit_message_text("Backend вернул неизвестный результат. Требуется проверка удаления.", reply_markup=back)
+                return
+            pending = {"ref": ref_id, "warnings": result["warnings"]}
+            context.user_data["deleted_vpn"] = pending
+        try:
+            with closing(db_connect()) as db, db:
+                delete_client_local_state(email, db)
+                delete_client_ref(email, db)
+        except sqlite3.Error:
+            await query.edit_message_text("VPN удалён, но локальный доступ ещё не отозван. Повторите очистку.",
+                                          reply_markup=InlineKeyboardMarkup([
+                                              [InlineKeyboardButton("Повторить очистку", callback_data=f"uy:{ref_id}")]]))
+            return
+        context.user_data.pop("deleted_vpn", None)
+        context.user_data.pop("delete_confirmation", None)
+        text = "✅ Пользователь удалён"
+        if pending["warnings"]:
+            text += "\n⚠️ Очистка файлов подключения не завершена; требуется проверка на сервере."
+        await query.edit_message_text(text, reply_markup=back)
+    if action == "u":
+        context.user_data.pop("delete_confirmation", None)
 
 
 async def create_bind_link(
@@ -817,7 +950,7 @@ async def create_bind_link(
             [
                 InlineKeyboardButton(
                     "⬅️ Профиль",
-                    callback_data=f"admin_user:{email}",
+                    callback_data=client_callback("u", email),
                 )
             ],
         ]
@@ -846,6 +979,10 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+    if not is_private_chat(update):
+        await update.message.reply_text("Карина VPN работает только в личном чате с ботом.")
+        return
+
     user = update.effective_user
 
     args = context.args
@@ -925,9 +1062,18 @@ async def callbacks(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     query = update.callback_query
+    if not is_private_chat(update):
+        await query.answer("Карина VPN работает только в личном чате с ботом.", show_alert=True)
+        return
     await query.answer()
 
     data = query.data
+    if not isinstance(data, str):
+        return
+    if ":" in data:
+        if is_admin(update):
+            await admin_ref_callback(update, context, data)
+        return
 
     # ADMIN
     if is_admin(update):
@@ -940,121 +1086,6 @@ async def callbacks(
         if data == "admin_users":
             await admin_users(
                 update
-            )
-            return
-
-        if data.startswith(
-            "admin_user:"
-        ):
-            email = data.split(
-                ":",
-                1,
-            )[1]
-
-            await admin_user(
-                update,
-                email,
-            )
-            return
-
-        if data.startswith(
-            "admin_bind:"
-        ):
-            email = data.split(
-                ":",
-                1,
-            )[1]
-
-            await create_bind_link(
-                update,
-                context,
-                email,
-            )
-            return
-
-        if data.startswith(
-            "admin_devices:"
-        ):
-            email = data.split(
-                ":",
-                1,
-            )[1]
-
-            code, output = run_karina(
-                [
-                    "devices",
-                    email,
-                ]
-            )
-
-            await query.edit_message_text(
-                f"📱 *Устройства {esc(email)}*\n\n"
-                f"```text\n{output}\n```",
-                reply_markup=InlineKeyboardMarkup(
-                    [
-                        [
-                            InlineKeyboardButton(
-                                "⬅️ Профиль",
-                                callback_data=f"admin_user:{email}",
-                            )
-                        ]
-                    ]
-                ),
-                parse_mode=ParseMode.MARKDOWN_V2,
-            )
-            return
-
-        if data.startswith(
-            "admin_connect:"
-        ):
-            email = data.split(
-                ":",
-                1,
-            )[1]
-
-            code, output = run_karina(
-                [
-                    "info",
-                    email,
-                ]
-            )
-
-            info = extract_info(
-                output
-            )
-
-            url = info.get(
-                "url"
-            )
-
-            keyboard = []
-
-            if url:
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            "💗 Подключить Карина VPN",
-                            url=url,
-                        )
-                    ]
-                )
-
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        "⬅️ Профиль",
-                        callback_data=f"admin_user:{email}",
-                    )
-                ]
-            )
-
-            await query.edit_message_text(
-                "🔗 *Подключение*\n\n"
-                "Можно отправить пользователю кнопку ниже\\.",
-                reply_markup=InlineKeyboardMarkup(
-                    keyboard
-                ),
-                parse_mode=ParseMode.MARKDOWN_V2,
             )
             return
 
