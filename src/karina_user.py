@@ -287,6 +287,45 @@ def cmd_delete_confirmed(args):
     print(json.dumps(delete_client_impl(ClientService.validate_email(args[0]))))
 
 
+def format_mobile_migration_plan(plan):
+    lines = ["Karina VPN — Mobile migration dry-run", "", f"User: {plan.primary_email}",
+             f"Primary exists: {plan.primary_exists}",
+             f"Primary inbound: {','.join(map(str, plan.primary_inbound_ids)) or '-'}",
+             f"Mobile credential: {plan.mobile_email}", f"Mobile exists: {plan.mobile_exists}",
+             f"Mobile inbound: {','.join(map(str, plan.mobile_inbound_ids)) or '-'}",
+             f"Mobile quota bytes: {plan.mobile_total_bytes if plan.mobile_total_bytes is not None else '-'}",
+             f"Mobile subscription configured: {plan.mobile_subscription_url_present}", "", "Plan:"]
+    flags = ((plan.needs_mobile_create, "[CREATE] mobile credential"),
+             (plan.needs_mobile_quota_fix, "[FIX] mobile quota"),
+             (plan.needs_expiry_sync, "[SYNC] absolute expiry"),
+             (plan.needs_hwid_sync, "[SYNC] HWID policy"),
+             (plan.needs_external_link_update, "[LINK+VERIFY] mobile subscription"),
+             (plan.needs_primary_detach, "[DETACH] mobile inbound from primary"))
+    lines.extend((f"  {text}" for needed, text in flags if needed))
+    if not any(needed for needed, _ in flags):
+        lines.append("  no changes required")
+    if plan.already_migrated:
+        lines += ["", "Status: ALREADY MIGRATED"]
+    lines += [*(f"Warning: {item}" for item in plan.warnings),
+              *(f"BLOCKING: {item}" for item in plan.blocking_errors)]
+    return "\n".join(lines)
+
+
+def cmd_migrate_mobile(args):
+    if not 1 <= len(args) <= 2 or (len(args) == 2 and args[1] not in {"--dry-run", "--apply"}):
+        die("usage: karina-user migrate-mobile EMAIL [--dry-run|--apply]")
+    service = build_service()
+    plan = service.plan_mobile_migration(args[0])
+    print(format_mobile_migration_plan(plan))
+    if plan.blocking_errors:
+        raise ClientServiceError("migration blocked by pre-flight checks")
+    if len(args) < 2 or args[1] == "--dry-run":
+        print("\nNo changes performed.")
+        return
+    service.migrate_client_to_mobile_bundle(args[0])
+    print("\nMigration applied. Run dry-run again to verify ALREADY MIGRATED.")
+
+
 def usage():
     print(
         """
@@ -347,6 +386,7 @@ def main():
         "devices-reset": cmd_devices_reset, "extend": cmd_extend,
         "disable": cmd_disable, "enable": cmd_enable, "delete": cmd_delete,
         "delete-confirmed": cmd_delete_confirmed,
+        "migrate-mobile": cmd_migrate_mobile,
     }
     handler = commands.get(sys.argv[1])
     if not handler:

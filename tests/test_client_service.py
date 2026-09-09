@@ -42,6 +42,8 @@ class FakeXUI:
         self.deleted = []
         self.removed_devices = []
         self.reset = []
+        self.external_updates = []
+        self.detached = []
 
     def get_client(self, email):
         value = self.clients.get(email)
@@ -76,6 +78,19 @@ class FakeXUI:
 
     def reset_hwids(self, email):
         self.reset.append(email)
+
+    def set_external_links(self, email, links):
+        self.external_updates.append((email, deepcopy(links)))
+        self.clients[email]["externalLinks"] = [
+            {"kind": link.kind, "value": link.value, "remark": link.remark}
+            for link in links
+        ]
+
+    def detach_inbounds(self, email, inbound_ids):
+        self.detached.append((email, tuple(inbound_ids)))
+        self.clients[email]["inboundIds"] = [
+            value for value in self.clients[email]["inboundIds"] if value not in inbound_ids
+        ]
 
 
 @pytest.fixture
@@ -300,6 +315,88 @@ def test_days_validation(config, tmp_path, days):
     service, _ = make_service(config, tmp_path)
     with pytest.raises(ValidationError):
         service.create_client("demo", days=days)
+
+
+def test_create_mobile_bundle(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    service, xui = make_service(config, tmp_path)
+    result = service.create_client_bundle("Mikhail")
+    primary, mobile = result.bundle.primary, result.bundle.mobile
+    assert primary.inbound_ids == (2, 3, 4) and primary.total_traffic_bytes == 0
+    assert mobile.inbound_ids == (5,)
+    assert mobile.total_traffic_bytes == 53687091200
+    assert primary.sub_id != mobile.sub_id
+    assert primary.expiry_time_ms == mobile.expiry_time_ms
+    link = xui.clients["Mikhail"]["externalLinks"][0]
+    assert link == {"kind": "subscription",
+                    "value": config.sub_base + "/" + mobile.sub_id,
+                    "remark": "karina-mobile"}
+    assert "localhost" not in link["value"] and "vless://" not in link["value"]
+
+
+def test_migration_detaches_mobile_inbound_last(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    service, xui = make_service(config, tmp_path, {"Mikhail": raw_client(
+        "Mikhail", inbounds=(2, 3, 4, 5))})
+    result = service.migrate_client_to_mobile_bundle("Mikhail")
+    assert result.mobile.inbound_ids == (5,)
+    assert xui.detached == [("Mikhail", (5,))]
+
+
+def test_migration_plan_is_read_only_and_redacts_state(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    clients = {"Mikhail": raw_client("Mikhail", inbounds=(2, 3, 4, 5),
+                                      sub_id="primary-secret")}
+    clients["Mikhail"]["externalLinks"] = [{
+        "id": 7, "kind": "link", "value": "https://unrelated.example/path",
+        "remark": "unrelated", "lastFetchError": "server-only",
+    }]
+    service, xui = make_service(config, tmp_path, clients)
+    before = deepcopy(xui.clients)
+    plan = service.plan_mobile_migration("Mikhail")
+    assert xui.clients == before
+    assert not xui.updated and not xui.deleted and not xui.external_updates and not xui.detached
+    assert plan.needs_mobile_create and plan.needs_external_link_update
+    assert plan.needs_primary_detach and not plan.blocking_errors
+
+
+def test_already_migrated_plan_is_noop(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    primary = raw_client("Mikhail", inbounds=(2, 3, 4))
+    mobile = raw_client("Mikhail__mobile", inbounds=(5,), traffic=53687091200,
+                        sub_id="mobile-secret")
+    primary["externalLinks"] = [{"kind": "subscription",
+                                  "value": config.sub_base + "/mobile-secret",
+                                  "remark": "karina-mobile"}]
+    service, _ = make_service(config, tmp_path,
+                              {"Mikhail": primary, "Mikhail__mobile": mobile})
+    plan = service.plan_mobile_migration("Mikhail")
+    assert plan.already_migrated and not plan.blocking_errors
+
+
+def test_migration_plan_blocks_unsafe_states(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    service, _ = make_service(config, tmp_path)
+    assert service.plan_mobile_migration("missing").blocking_errors
+    assert service.plan_mobile_migration("name__mobile").blocking_errors
+    primary = raw_client("Mikhail", inbounds=(2, 3, 4, 5))
+    primary["externalLinks"] = [
+        {"kind": "subscription", "value": "one", "remark": "karina-mobile"},
+        {"kind": "subscription", "value": "two", "remark": "karina-mobile"},
+    ]
+    service, _ = make_service(config, tmp_path, {"Mikhail": primary})
+    plan = service.plan_mobile_migration("Mikhail")
+    assert plan.blocking_errors and plan.managed_external_link_count == 2
 
 
 @pytest.mark.parametrize("limit", [-1, 1.5, True])

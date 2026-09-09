@@ -105,6 +105,28 @@ class XUIClient:
                         urllib.parse.quote(email, safe=""), {}, csrf=True),
                         "не удалось удалить клиента")
 
+    def set_external_links(self, email, links):
+        payload = {"externalLinks": [
+            {"kind": link.kind, "value": link.value, "remark": link.remark}
+            for link in links
+        ]}
+        self._operation(self.request(
+            "POST", "/panel/api/clients/" + urllib.parse.quote(email, safe="") +
+            "/externalLinks", payload, csrf=True,
+        ), "failed to set external links")
+
+    def attach_inbounds(self, email, inbound_ids):
+        self._operation(self.request(
+            "POST", "/panel/api/clients/" + urllib.parse.quote(email, safe="") + "/attach",
+            {"inboundIds": list(inbound_ids)}, csrf=True,
+        ), "failed to attach inbounds")
+
+    def detach_inbounds(self, email, inbound_ids):
+        self._operation(self.request(
+            "POST", "/panel/api/clients/" + urllib.parse.quote(email, safe="") + "/detach",
+            {"inboundIds": list(inbound_ids)}, csrf=True,
+        ), "failed to detach inbounds")
+
     def get_hwids(self, email):
         return self._operation(self.request("POST", "/panel/api/clients/hwids/" +
                                urllib.parse.quote(email, safe=""), {}, csrf=True),

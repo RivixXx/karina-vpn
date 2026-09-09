@@ -57,6 +57,15 @@ Focused fixes:
 - SQLite retains Telegram bindings, notification delivery state and billing
   state. Notifier deduplication writes the numeric expiry timestamp while also
   recognizing legacy localized expiry keys.
+- `models/billing.py`, `services/billing_service.py` and
+  `repositories/billing_repository.py` define the canonical plans, typed order
+  lifecycle and SQLite persistence. Telegram can create and cancel pending
+  orders through `BillingService`; no payment provider is connected yet.
+- Client bundles use a primary credential and an internal `__mobile` credential.
+  Primary inbound IDs and the mobile inbound/quota are typed configuration; the
+  default mobile quota is exactly 50 GiB. Explicit migration verifies the
+  aggregated mobile subscription before detaching the mobile inbound from the
+  primary credential and is never run automatically.
 - `integrations/happ/subscription.py` exposes the existing Happ, Crypt5, QR and
   connection-page issuance flow as an injectable Python function;
   `karina_issue.py` remains its command-line adapter.
@@ -88,3 +97,27 @@ Known limitations:
 - Other security and billing findings from the audit remain unresolved.
 - Notification delivery uses send-then-record ordering. A process crash after
   Telegram accepts a message but before the SQLite commit can cause a retry.
+- Applying a paid order extends XUI before marking the SQLite order completed.
+  A crash between those operations can require manual reconciliation.
+
+## Primary/mobile rollout procedure
+
+Do not bulk migrate users. Perform these steps later during an approved deployment:
+
+1. Back up `/opt/karina-bot`, `/usr/local/bin/karina-user`,
+   `/etc/karina-vpn/config.env`, and `/etc/x-ui/x-ui.db`.
+2. Update the application files.
+3. Add `PRIMARY_INBOUND_IDS=2,3,4`, `MOBILE_INBOUND_ID=5`, and
+   `MOBILE_TRAFFIC_GB=50` to `/etc/karina-vpn/config.env`.
+4. Run compile and import smoke checks.
+5. Restart the bot and notifier if the deployment requires it.
+6. Run `karina-user migrate-mobile Mikhail --dry-run`.
+7. Review the redacted plan and resolve every blocking error.
+8. Run `karina-user migrate-mobile Mikhail --apply`.
+9. Run the dry-run again and require `ALREADY MIGRATED`.
+10. Manually verify that the existing Happ subscription contains Germany,
+    Germany 2, Germany 3, and the mobile anti-blocking route.
+
+Dry-run reads client state and performs no XUI mutation. `--apply` is the only
+mode that changes one explicitly named user. Historical traffic attributed to
+the primary credential is not transferred to the new mobile counter.

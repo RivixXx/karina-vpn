@@ -73,6 +73,26 @@ def test_password_is_hidden_from_repr(tmp_path):
     assert "fixture_password" not in repr(config)
 
 
+def test_mobile_config(tmp_path):
+    config = load_config(write_config(
+        tmp_path, PRIMARY_INBOUND_IDS="2,3,4", MOBILE_INBOUND_ID="5",
+        MOBILE_TRAFFIC_GB="50",
+    ))
+    assert config.primary_inbound_ids == (2, 3, 4)
+    assert config.mobile_inbound_id == 5
+    assert config.mobile_traffic_bytes == 53687091200
+
+
+@pytest.mark.parametrize("overrides", [
+    {"PRIMARY_INBOUND_IDS": "2,2,4"},
+    {"PRIMARY_INBOUND_IDS": "2,3,5", "MOBILE_INBOUND_ID": "5"},
+    {"MOBILE_TRAFFIC_GB": "0"},
+])
+def test_invalid_mobile_config(tmp_path, overrides):
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, **overrides))
+
+
 def test_missing_file_does_not_disclose_credentials(tmp_path):
     with pytest.raises(ConfigError) as error:
         load_config(tmp_path / "missing.env")

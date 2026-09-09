@@ -50,6 +50,19 @@ def test_client_service_import_has_no_production_access(monkeypatch):
     assert module.ClientService.__name__ == "ClientService"
 
 
+def test_billing_modules_import_without_external_access(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Billing import attempted external access")
+
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.build_opener", blocked)
+    monkeypatch.setattr("sqlite3.connect", blocked)
+    for name in ("src.models.billing", "src.repositories.billing_repository",
+                 "src.services.billing_service"):
+        module = importlib.import_module(name)
+        importlib.reload(module)
+
+
 def test_application_import_has_no_production_access(monkeypatch):
     def blocked(*args, **kwargs):
         raise AssertionError("Application import attempted production access")

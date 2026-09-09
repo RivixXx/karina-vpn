@@ -15,6 +15,9 @@ class KarinaConfig:
     connect_base: str
     inbound_ids: tuple[int, ...]
     default_hwid_limit: int
+    primary_inbound_ids: tuple[int, ...] = ()
+    mobile_inbound_id: int = 5
+    mobile_traffic_bytes: int = 50 * 1024 ** 3
 
 
 def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig:
@@ -51,10 +54,26 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         raise ConfigError("INBOUND_IDS должен содержать только положительные числа")
     try:
         default_hwid_limit = int(values.get("DEFAULT_HWID_LIMIT", "2"))
+        mobile_inbound_id = int(values.get("MOBILE_INBOUND_ID", "5"))
+        mobile_traffic_gb = int(values.get("MOBILE_TRAFFIC_GB", "50"))
+        if "PRIMARY_INBOUND_IDS" in values:
+            primary_inbound_ids = tuple(int(item.strip()) for item in
+                                        values["PRIMARY_INBOUND_IDS"].split(",") if item.strip())
+        else:
+            primary_inbound_ids = tuple(value for value in inbound_ids
+                                        if value != mobile_inbound_id)
     except ValueError as exc:
         raise ConfigError("DEFAULT_HWID_LIMIT должен быть целым числом") from exc
     if default_hwid_limit < 0:
         raise ConfigError("DEFAULT_HWID_LIMIT не может быть отрицательным")
+
+    if (not primary_inbound_ids or any(value <= 0 for value in primary_inbound_ids)
+            or len(set(primary_inbound_ids)) != len(primary_inbound_ids)):
+        raise ConfigError("invalid PRIMARY_INBOUND_IDS")
+    if mobile_inbound_id <= 0 or mobile_inbound_id in primary_inbound_ids:
+        raise ConfigError("invalid MOBILE_INBOUND_ID")
+    if mobile_traffic_gb <= 0:
+        raise ConfigError("invalid MOBILE_TRAFFIC_GB")
 
     return KarinaConfig(
         xui_base=values["XUI_BASE"].rstrip("/"),
@@ -64,4 +83,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         connect_base=values["CONNECT_BASE"].rstrip("/"),
         inbound_ids=inbound_ids,
         default_hwid_limit=default_hwid_limit,
+        primary_inbound_ids=primary_inbound_ids,
+        mobile_inbound_id=mobile_inbound_id,
+        mobile_traffic_bytes=mobile_traffic_gb * 1024 ** 3,
     )

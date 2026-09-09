@@ -73,9 +73,11 @@ def local_db(tmp_path, source_functions):
     for filename, name, dependency in (
         ("bot.py", "init_db", "db_connect"),
         ("notifier.py", "init_db", "db_connect"),
-        ("billing.py", "init_billing", "connect"),
     ):
         source_functions(filename, {name}, **{dependency: connect})[name]()
+
+    from src.repositories import BillingRepository
+    BillingRepository(connect=connect).init_schema()
 
     with closing(connect()) as db, db:
         for email, tg_id in (("demo_target", 1), ("demo_other", 2)):

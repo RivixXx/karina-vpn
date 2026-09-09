@@ -23,14 +23,16 @@ try:
     from .app_config import ConfigError
     from .application import build_client_service
     from .integrations.xui import XUIError
-    from .models import ClientInfo, DeviceInfo, TrafficInfo
-    from .services import ClientServiceError
+    from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo
+    from .repositories import BillingRepository
+    from .services import BillingAccessError, BillingError, BillingService, ClientServiceError
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError
     from application import build_client_service
     from integrations.xui import XUIError
-    from models import ClientInfo, DeviceInfo, TrafficInfo
-    from services import ClientServiceError
+    from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo
+    from repositories import BillingRepository
+    from services import BillingAccessError, BillingError, BillingService, ClientServiceError
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -38,6 +40,13 @@ DB_FILE = Path("/opt/karina-bot/karina.db")
 SUPPORT_URL = "https://t.me/rivixxx"
 LOGGER = logging.getLogger(__name__)
 EXPECTED_SERVICE_ERRORS = (ConfigError, XUIError, ClientServiceError)
+EXPECTED_BILLING_ERRORS = (BillingError, sqlite3.Error)
+
+
+def build_billing_service():
+    repository = BillingRepository(DB_FILE)
+    repository.init_schema()
+    return BillingService(repository, build_client_service())
 
 
 # ============================================================
@@ -462,6 +471,36 @@ def client_keyboard(email, url=None):
     )
 
     return InlineKeyboardMarkup(rows)
+
+
+def billing_plans_keyboard(plans):
+    rows = []
+    for plan in plans:
+        badge = f" · {plan.badge}" if plan.badge else ""
+        rows.append([InlineKeyboardButton(
+            f"{plan.title} — {plan.price_rub} ₽{badge}",
+            callback_data=f"bill_plan:{plan.id}",
+        )])
+    rows.append([InlineKeyboardButton("⬅️ Мой профиль", callback_data="client_home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def billing_order_keyboard(order):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Перейти к оплате", callback_data=f"bill_pay:{order.id}")],
+        [InlineKeyboardButton("❌ Отменить заказ", callback_data=f"bill_cancel:{order.id}")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="client_pay")],
+    ])
+
+
+def format_billing_order(order, plan):
+    return (
+        "🧾 *Заказ создан*\n\n"
+        f"Тариф: {esc(plan.title)}\n"
+        f"Срок: {order.days} дней\n"
+        f"Стоимость: {order.amount_rub} ₽\n"
+        f"Заказ: `{esc(order.id)}`"
+    )
 
 
 async def render_client_home(update, email):
@@ -1008,7 +1047,7 @@ async def callbacks(
     data = query.data
     if not isinstance(data, str):
         return
-    if ":" in data:
+    if re.fullmatch(r"(?:u|ub|ud|uc|udel|uy):.*", data):
         if is_admin(update):
             await admin_ref_callback(update, context, data)
         return
@@ -1118,28 +1157,62 @@ async def callbacks(
         return
 
     if data == "client_pay":
+        try:
+            plans = build_billing_service().list_plans()
+        except EXPECTED_BILLING_ERRORS:
+            LOGGER.warning("Unable to load billing plans", exc_info=True)
+            await query.answer("Не удалось загрузить тарифы", show_alert=True)
+            return
         await query.edit_message_text(
-            "💳 *Продление Карина VPN*\n\n"
-            "Онлайн\\-оплата сейчас готовится\\.\n\n"
-            "Пока для продления напиши в поддержку 👇",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "💬 Продлить через поддержку",
-                            url=SUPPORT_URL,
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            "🏠 Мой профиль",
-                            callback_data="client_home",
-                        )
-                    ],
-                ]
-            ),
+            "💳 *Продлить Карина VPN*\n\nВыберите тариф:",
+            reply_markup=billing_plans_keyboard(plans), parse_mode=ParseMode.MARKDOWN_V2,
+        )
+        return
+
+    if data.startswith("bill_plan:"):
+        plan_id = data.removeprefix("bill_plan:")
+        try:
+            billing = build_billing_service()
+            plan = next((item for item in billing.list_plans() if item.id == plan_id), None)
+            order = billing.create_order(user.id, email, plan_id)
+        except EXPECTED_BILLING_ERRORS:
+            LOGGER.warning("Unable to create billing order", exc_info=True)
+            await query.answer("Не удалось создать заказ", show_alert=True)
+            return
+        await query.edit_message_text(
+            format_billing_order(order, plan), reply_markup=billing_order_keyboard(order),
             parse_mode=ParseMode.MARKDOWN_V2,
         )
+        return
+
+    if data.startswith(("bill_pay:", "bill_cancel:")):
+        action, order_id = data.split(":", 1)
+        try:
+            billing = build_billing_service()
+            order = billing.get_order(order_id)
+            if order is None or order.tg_id != user.id or order.email != email:
+                raise BillingAccessError("Заказ принадлежит другому пользователю")
+            if action == "bill_cancel":
+                billing.cancel_order(order_id, user.id)
+        except EXPECTED_BILLING_ERRORS:
+            LOGGER.warning("Billing order access failed", exc_info=True)
+            await query.answer("Заказ недоступен", show_alert=True)
+            return
+        if action == "bill_pay":
+            if order.status is OrderStatus.COMPLETED:
+                text = "✅ *Заказ выполнен\\.*"
+            else:
+                text = "💳 *Платёжный провайдер ещё не подключён\\.*"
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Назад", callback_data="client_pay")
+            ]]), parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            await query.edit_message_text(
+                "❌ Заказ отменён\\.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ К тарифам", callback_data="client_pay")
+                ]]), parse_mode=ParseMode.MARKDOWN_V2,
+            )
         return
 
     if data == "client_bonus":

@@ -3,6 +3,7 @@ import re
 import secrets
 import string
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -12,18 +13,20 @@ try:
     from ..integrations.xui import XUIClient, XUIError
     from ..models import (
         ClientInfo, CreateClientResult, DeleteClientResult, DeviceInfo,
-        ExpiringClient, TrafficInfo,
+        ClientBundle, CreateClientBundleResult, ExternalLinkInput, MobileMigrationPlan,
+        ExpiringClient, TrafficInfo, is_mobile_email, mobile_email_for,
     )
 except ImportError:  # Direct CLI execution from the src directory.
     from app_config import KarinaConfig
     from integrations.xui import XUIClient, XUIError
     from models import (
         ClientInfo, CreateClientResult, DeleteClientResult, DeviceInfo,
-        ExpiringClient, TrafficInfo,
+        ClientBundle, CreateClientBundleResult, ExternalLinkInput, MobileMigrationPlan,
+        ExpiringClient, TrafficInfo, is_mobile_email, mobile_email_for,
     )
 from .errors import (
     ClientAlreadyExistsError, ClientNotFoundError, ClientServiceError,
-    ValidationError,
+    ReconciliationRequiredError, ValidationError,
 )
 
 
@@ -141,6 +144,8 @@ class ClientService:
     def list_clients(self) -> list[ClientInfo]:
         result = []
         for email in self._client_names():
+            if is_mobile_email(email):
+                continue
             client = self.get_client(email)
             if client:
                 result.append(client)
@@ -180,6 +185,186 @@ class ClientService:
                 warning = (str(exc) or type(exc).__name__)[:500]
         return CreateClientResult(client, page, warning)
 
+    def _create_credential(self, email, expiry, limit, total, inbound_ids):
+        payload = {"client": {
+            "id": str(uuid.uuid4()), "email": email, "subId": self._sub_id(),
+            "expiryTime": expiry, "totalGB": total, "limitIp": 0,
+            "limitHwid": limit, "enable": True, "tgId": 0, "flow": "",
+            "security": "auto", "group": "", "comment": "", "reset": 0,
+            "resetDay": 0, "resetMax": 0, "trafficReset": "never",
+            "trafficResetDay": 1,
+        }, "inboundIds": list(inbound_ids)}
+        self._call(lambda: self.xui.create_client(payload), "credential creation failed")
+        created = self._call(lambda: self.xui.get_client(email), "credential verification failed")
+        if not created:
+            raise ClientServiceError("credential missing after creation")
+        return self._to_client_info(created)
+
+    @staticmethod
+    def _writable_links(obj):
+        return [ExternalLinkInput(str(item.get("kind") or ""),
+                                  str(item.get("value") or ""),
+                                  str(item.get("remark") or ""))
+                for item in obj.get("externalLinks", [])
+                if item.get("kind") in {"link", "subscription"}]
+
+    def _ensure_mobile_subscription(self, primary_email, mobile_sub_id):
+        expected = f"{self.config.sub_base}/{mobile_sub_id}"
+        obj = self._call(lambda: self.xui.get_client(primary_email), "primary lookup failed")
+        links = self._writable_links(obj)
+        managed = [link for link in links
+                   if link.kind == "subscription" and link.remark == "karina-mobile"]
+        if len(managed) == 1 and managed[0].value == expected:
+            return
+        retained = [link for link in links
+                    if not (link.kind == "subscription" and link.remark == "karina-mobile")]
+        replacement = retained + [ExternalLinkInput("subscription", expected, "karina-mobile")]
+        self._call(lambda: self.xui.set_external_links(primary_email, replacement),
+                   "external subscription update failed")
+        verified = self._call(lambda: self.xui.get_client(primary_email),
+                              "external subscription verification failed")
+        verified_links = self._writable_links(verified)
+        matches = [link for link in verified_links
+                   if link.kind == "subscription" and link.remark == "karina-mobile"
+                   and link.value == expected]
+        if len(matches) != 1 or any(link not in verified_links for link in retained):
+            raise ReconciliationRequiredError("external subscription verification failed")
+
+    def create_client_bundle(self, email, days=30, hwid_limit=None):
+        email = self.validate_email(email)
+        try:
+            mobile_email = mobile_email_for(email)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        days = self._positive_days(days)
+        if self.get_client(email) or self.get_client(mobile_email):
+            raise ClientAlreadyExistsError(f"client {email} already exists")
+        expiry = self.now_provider() + days * 86400000
+        limit = self.config.default_hwid_limit if hwid_limit is None else self._hwid_limit(hwid_limit)
+        primary = mobile = None
+        try:
+            primary = self._create_credential(
+                email, expiry, limit, 0,
+                self.config.primary_inbound_ids or self.config.inbound_ids,
+            )
+            mobile = self._create_credential(
+                mobile_email, expiry, limit, self.config.mobile_traffic_bytes,
+                (self.config.mobile_inbound_id,),
+            )
+            self._ensure_mobile_subscription(email, mobile.sub_id)
+        except Exception as exc:
+            rollback_errors = []
+            for candidate in (mobile_email if mobile else None, email if primary else None):
+                if candidate:
+                    try:
+                        self.xui.delete_client(candidate)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(type(rollback_exc).__name__)
+            if rollback_errors:
+                raise ReconciliationRequiredError("bundle rollback incomplete") from exc
+            raise
+        page = self.issue_subscription(primary.sub_id) if self.issue_subscription else None
+        return CreateClientBundleResult(ClientBundle(primary, mobile), page)
+
+    def get_client_bundle(self, email):
+        primary = self.get_client(email)
+        if primary is None:
+            return None
+        return ClientBundle(primary, self.get_client(mobile_email_for(email)))
+
+    def migrate_client_to_mobile_bundle(self, email):
+        plan = self.plan_mobile_migration(email)
+        if plan.blocking_errors:
+            raise ReconciliationRequiredError("; ".join(plan.blocking_errors))
+        if plan.already_migrated:
+            return self.get_client_bundle(email)
+        primary = self.get_client(email)
+        if primary is None:
+            raise ClientNotFoundError(f"client {email} not found")
+        mobile_email = mobile_email_for(email)
+        mobile = self.get_client(mobile_email)
+        if mobile is None:
+            mobile = self._create_credential(
+                mobile_email, primary.expiry_time_ms, primary.device_limit,
+                self.config.mobile_traffic_bytes, (self.config.mobile_inbound_id,),
+            )
+        elif mobile.inbound_ids != (self.config.mobile_inbound_id,):
+            raise ReconciliationRequiredError("existing mobile credential is inconsistent")
+        if mobile.total_traffic_bytes != self.config.mobile_traffic_bytes:
+            mobile = self._update(mobile_email, lambda client: client.__setitem__(
+                "totalGB", self.config.mobile_traffic_bytes
+            ))
+        if (mobile.expiry_time_ms != primary.expiry_time_ms or
+                mobile.device_limit != primary.device_limit):
+            def synchronize(client):
+                client["expiryTime"] = primary.expiry_time_ms
+                client["limitHwid"] = primary.device_limit
+            mobile = self._update(mobile_email, synchronize)
+        self._ensure_mobile_subscription(email, mobile.sub_id)
+        if self.config.mobile_inbound_id in primary.inbound_ids:
+            self._call(lambda: self.xui.detach_inbounds(email, (self.config.mobile_inbound_id,)),
+                       "mobile inbound detach failed")
+        final = self.get_client_bundle(email)
+        return final
+
+    def plan_mobile_migration(self, email):
+        blocking = []
+        warnings = ("Historical inbound 5 traffic is not transferred to the mobile credential.",)
+        if is_mobile_email(email):
+            blocking.append("input email is an internal mobile credential")
+            primary_obj = None
+            mobile_email = email
+        else:
+            email = self.validate_email(email)
+            mobile_email = mobile_email_for(email)
+            _, primary_obj = self._raw_client(email)
+        if primary_obj is None:
+            blocking.append("primary credential does not exist")
+            return MobileMigrationPlan(
+                email, mobile_email, False, False, (), (), 0, None, 0, None, 0, None,
+                False, False, 0, False, False, False, False, False, False,
+                False, warnings, tuple(blocking),
+            )
+        primary = self._to_client_info(primary_obj)
+        _, mobile_obj = self._raw_client(mobile_email)
+        mobile = self._to_client_info(mobile_obj) if mobile_obj else None
+        if mobile is not None and not mobile.sub_id:
+            blocking.append("existing mobile credential has no subscription identity")
+        links = self._writable_links(primary_obj)
+        managed = [link for link in links
+                   if link.kind == "subscription" and link.remark == "karina-mobile"]
+        if len(managed) > 1:
+            blocking.append("multiple managed karina-mobile external links")
+        expected_primary = set(self.config.primary_inbound_ids or self.config.inbound_ids)
+        if set(primary.inbound_ids) - {self.config.mobile_inbound_id} != expected_primary:
+            blocking.append("primary inbound set does not match configured primary inbounds")
+        allowed_primary = expected_primary | {self.config.mobile_inbound_id}
+        if not set(primary.inbound_ids).issubset(allowed_primary):
+            blocking.append("primary has unexpected inbound state")
+        mobile_inbounds = mobile.inbound_ids if mobile else ()
+        if mobile and mobile_inbounds != (self.config.mobile_inbound_id,):
+            blocking.append("existing mobile credential has incompatible inbound state")
+        expected_url = f"{self.config.sub_base}/{mobile.sub_id}" if mobile else None
+        link_present = bool(managed)
+        link_correct = bool(expected_url and len(managed) == 1 and managed[0].value == expected_url)
+        needs_create = mobile is None
+        needs_quota = bool(mobile and mobile.total_traffic_bytes != self.config.mobile_traffic_bytes)
+        needs_expiry = bool(mobile and mobile.expiry_time_ms != primary.expiry_time_ms)
+        needs_hwid = bool(mobile and mobile.device_limit != primary.device_limit)
+        needs_detach = self.config.mobile_inbound_id in primary.inbound_ids
+        needs_link = not link_correct
+        already = not blocking and not any((needs_create, needs_quota, needs_expiry,
+                                             needs_hwid, needs_detach, needs_link))
+        return MobileMigrationPlan(
+            email, mobile_email, True, mobile is not None, primary.inbound_ids,
+            mobile_inbounds, primary.expiry_time_ms,
+            mobile.expiry_time_ms if mobile else None, primary.device_limit,
+            mobile.device_limit if mobile else None, primary.total_traffic_bytes,
+            mobile.total_traffic_bytes if mobile else None, link_present, link_correct,
+            len(managed), needs_create, needs_link, needs_detach, needs_quota,
+            needs_expiry, needs_hwid, already, warnings, tuple(blocking),
+        )
+
     def _update(self, email, mutate):
         email, obj = self._require_raw(email)
         client = obj["client"]
@@ -192,15 +377,47 @@ class ClientService:
     def extend_client(self, email, days) -> ClientInfo:
         days = self._positive_days(days)
         now = self.now_provider()
-        return self._update(email, lambda client: client.__setitem__(
+        primary = self._update(email, lambda client: client.__setitem__(
             "expiryTime", max(int(client.get("expiryTime", 0) or 0), now) + days * 86400000
         ))
+        try:
+            mobile_email = mobile_email_for(email)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if self.get_client(mobile_email):
+            try:
+                self._update(mobile_email, lambda client: client.__setitem__(
+                    "expiryTime", primary.expiry_time_ms
+                ))
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "primary extended but mobile expiry synchronization failed"
+                ) from exc
+        return primary
 
     def enable_client(self, email) -> ClientInfo:
-        return self._update(email, lambda client: client.__setitem__("enable", True))
+        return self._set_bundle_enabled(email, True)
 
     def disable_client(self, email) -> ClientInfo:
-        return self._update(email, lambda client: client.__setitem__("enable", False))
+        return self._set_bundle_enabled(email, False)
+
+    def _set_bundle_enabled(self, email, enabled):
+        primary = self._update(email, lambda client: client.__setitem__("enable", enabled))
+        mobile_email = mobile_email_for(email)
+        if self.get_client(mobile_email):
+            try:
+                self._update(mobile_email, lambda client: client.__setitem__("enable", enabled))
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "primary updated but mobile state synchronization failed"
+                ) from exc
+        return primary
+
+    def get_mobile_traffic(self, email) -> TrafficInfo | None:
+        mobile_email = mobile_email_for(email)
+        if self.get_client(mobile_email) is None:
+            return None
+        return self.get_traffic(mobile_email)
 
     def set_hwid_limit(self, email, limit) -> ClientInfo:
         limit = self._hwid_limit(limit)
@@ -248,6 +465,8 @@ class ClientService:
         limit = now + days * 86400000
         result = []
         for email in self._client_names():
+            if is_mobile_email(email):
+                continue
             obj = self._call(lambda email=email: self.xui.get_client(email),
                              "ошибка получения клиента")
             if not obj:

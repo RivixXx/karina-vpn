@@ -16,3 +16,7 @@ class ValidationError(ClientServiceError):
 
 class SubscriptionIssueError(ClientServiceError):
     pass
+
+
+class ReconciliationRequiredError(ClientServiceError):
+    pass

@@ -164,3 +164,33 @@ def test_low_level_layer_has_no_cli_side_effects():
     calls = [node.func.id for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
     assert "print" not in calls and "die" not in calls and "exit" not in calls
+
+
+def test_external_links_exact_contract(config):
+    from src.models import ExternalLinkInput
+    api = client(config, {"success": True})
+    api.csrf = "csrf_fixture"
+    api.set_external_links("name+test", [
+        ExternalLinkInput("link", "https://other.example", "other"),
+        ExternalLinkInput("subscription", "https://sub.example.test/mobile", "karina-mobile"),
+    ])
+    request = api.opener.requests[0][0]
+    assert request.method == "POST"
+    assert request.full_url.endswith("/panel/api/clients/name%2Btest/externalLinks")
+    assert json.loads(request.data) == {"externalLinks": [
+        {"kind": "link", "value": "https://other.example", "remark": "other"},
+        {"kind": "subscription", "value": "https://sub.example.test/mobile",
+         "remark": "karina-mobile"},
+    ]}
+
+
+@pytest.mark.parametrize(("method", "suffix"), [
+    ("attach_inbounds", "attach"), ("detach_inbounds", "detach"),
+])
+def test_inbound_membership_exact_contract(config, method, suffix):
+    api = client(config, {"success": True})
+    api.csrf = "csrf_fixture"
+    getattr(api, method)("demo", [5])
+    request = api.opener.requests[0][0]
+    assert request.full_url.endswith(f"/panel/api/clients/demo/{suffix}")
+    assert json.loads(request.data) == {"inboundIds": [5]}
