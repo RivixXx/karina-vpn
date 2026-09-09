@@ -66,9 +66,10 @@ Focused fixes:
   default mobile quota is exactly 50 GiB. Explicit migration verifies the
   aggregated mobile subscription before detaching the mobile inbound from the
   primary credential and is never run automatically.
-- `integrations/happ/subscription.py` exposes the existing Happ, Crypt5, QR and
-  connection-page issuance flow as an injectable Python function;
-  `karina_issue.py` remains its command-line adapter.
+- `integrations/subscription.py` is the canonical direct HTTPS subscription
+  issuer. It atomically writes a QR code and connection page without calling an
+  external crypto service. `karina_issue.py` is its thin command-line adapter;
+  `integrations/happ` remains only as a compatibility import.
 - CLI list columns now have explicit two-space separators, including for
   names of 18, 32 and 64 characters. This remains the notifier-facing CLI
   contract; Telegram no longer parses the table.
@@ -121,3 +122,101 @@ Do not bulk migrate users. Perform these steps later during an approved deployme
 Dry-run reads client state and performs no XUI mutation. `--apply` is the only
 mode that changes one explicitly named user. Historical traffic attributed to
 the primary credential is not transferred to the new mobile counter.
+
+## Production deployment
+
+Production uses one Git checkout at `/opt/karina-vpn`. Application source stays
+inside that checkout. Secrets and databases remain outside Git:
+
+- `/etc/karina-vpn/config.env` contains XUI and subscription configuration.
+- `/opt/karina-bot/.env` and `/opt/karina-bot/karina.db` remain at their legacy
+  paths until a separately reviewed data-path migration.
+- `/etc/x-ui/x-ui.db` remains owned by 3x-ui.
+
+The administrator selects and pulls the desired Git revision separately.
+`scripts/deploy.sh` never pulls or pushes Git state. It creates `.venv`, installs
+`requirements.txt`, performs compile/import checks, installs the CLI wrapper and
+systemd units, restarts the bot, enables the notifier timer, and runs read-only
+smoke checks. Run it as root from the clean `/opt/karina-vpn` checkout.
+
+The implemented production configuration keys are:
+
+```dotenv
+PRIMARY_INBOUND_IDS=2,3,4
+MOBILE_INBOUND_ID=5
+MOBILE_TRAFFIC_GB=50
+CONNECT_DIR=/var/www/karina/connect
+```
+
+`INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
+`.env`, database files, tokens, or credentials in Git.
+
+### First Git Deployment
+
+1. Run `bash scripts/backup-production.sh` from the reviewed checkout.
+2. Clone the private repository into `/opt/karina-vpn` and select the approved
+   commit.
+3. Preserve `/opt/karina-bot/.env` and `/opt/karina-bot/karina.db`.
+4. Add the three primary/mobile keys above to `/etc/karina-vpn/config.env`.
+5. Run `bash scripts/preflight.sh` and review every warning.
+6. Run `bash scripts/deploy.sh` as root.
+7. Check `karina-bot.service` and `karina-notifier.timer` status.
+8. Run `karina-user migrate-mobile Mikhail --dry-run` and send the redacted
+   output to the tech lead.
+9. **DO NOT RUN `migrate-mobile --apply` until the dry-run has been reviewed and
+   separately approved.**
+10. After approval, apply that one user, repeat dry-run, require
+    `ALREADY MIGRATED`, and manually verify all four Happ routes.
+
+Deployment never migrates users, changes nginx/routing, or edits either SQLite
+database directly.
+
+## Canonical onboarding
+
+Normal onboarding follows one authoritative flow:
+
+```text
+XUI create
+→ XUI read-back
+→ actual authoritative SUB_ID
+→ direct HTTPS subscription
+→ atomic QR/HTML generation
+→ generated artifact verification
+→ Telegram connection URL
+```
+
+The value returned by XUI read-back is used even if it differs from the value
+requested during creation. The QR code and button contain the direct HTTPS
+subscription URL from `SUB_BASE`; no network request is made while producing
+the local PNG and HTML files. Output goes to `CONNECT_DIR`, and Telegram receives
+the page URL derived from `CONNECT_BASE`.
+
+Crypt5 is not part of normal onboarding. Existing `.crypt5` files are legacy
+artifacts only. Deployment does not issue subscriptions, regenerate existing
+users, call `crypto.happ.su`, or modify files in `/var/www/karina/connect` in
+bulk. Mobile migration remains a separate, explicit per-user operation and is
+never started by deployment.
+
+## Backup
+
+Run `bash scripts/backup-production.sh` as root before the first deployment and
+before risky maintenance. It creates a mode-700 timestamped directory below
+`/root/karina-backups`, copies config, XUI DB, legacy bot config/DB, relevant
+systemd units and the site-specific nginx file when present, then restricts files
+to mode 600. It does not print file contents or include Let's Encrypt keys.
+
+## Rollback
+
+`bash scripts/rollback-code.sh <previous-commit>` requires a clean checkout,
+resolves the supplied commit, checks it out detached, and invokes the normal
+deploy script. It never restores or modifies SQLite data.
+
+**Code rollback is not data rollback.** Restore data only through a separate,
+explicitly reviewed recovery procedure using a verified backup.
+
+## Mobile migration
+
+Migration is always manual and processes one email. A dry-run may read XUI but
+performs no mutation. `--apply` creates/repairs the mobile credential and detaches
+the mobile inbound only after the external subscription has been verified.
+Neither deployment nor service startup invokes this command.

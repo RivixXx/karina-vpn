@@ -18,6 +18,7 @@ class KarinaConfig:
     primary_inbound_ids: tuple[int, ...] = ()
     mobile_inbound_id: int = 5
     mobile_traffic_bytes: int = 50 * 1024 ** 3
+    connect_dir: Path = Path("/var/www/karina/connect")
 
 
 def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig:
@@ -86,4 +87,5 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         primary_inbound_ids=primary_inbound_ids,
         mobile_inbound_id=mobile_inbound_id,
         mobile_traffic_bytes=mobile_traffic_gb * 1024 ** 3,
+        connect_dir=Path(values.get("CONNECT_DIR", "/var/www/karina/connect")),
     )

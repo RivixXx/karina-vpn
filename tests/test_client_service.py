@@ -137,6 +137,22 @@ def test_create_success_preserves_payload(config, tmp_path):
     assert xui.created_payload["inboundIds"] == [1, 2]
 
 
+def test_create_issues_from_authoritative_xui_readback_sub_id(config, tmp_path):
+    issued = []
+    service, xui = make_service(config, tmp_path, issue=lambda sub_id: issued.append(sub_id))
+    original_create = xui.create_client
+
+    def create_with_authoritative_id(payload):
+        original_create(payload)
+        xui.clients[payload["client"]["email"]]["client"]["subId"] = "authoritative123"
+
+    xui.create_client = create_with_authoritative_id
+    result = service.create_client("demo")
+
+    assert result.client.sub_id == "authoritative123"
+    assert issued == ["authoritative123"]
+
+
 def test_create_duplicate(config, tmp_path):
     service, _ = make_service(config, tmp_path, {"demo": raw_client()})
     with pytest.raises(ClientAlreadyExistsError):

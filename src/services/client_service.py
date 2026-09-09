@@ -180,7 +180,7 @@ class ClientService:
             try:
                 page = self.issue_subscription(client.sub_id)
                 if page is None:
-                    warning = "генерация Crypt5/QR завершилась ошибкой"
+                    warning = "генерация QR/страницы подключения завершилась ошибкой"
             except Exception as exc:
                 warning = (str(exc) or type(exc).__name__)[:500]
         return CreateClientResult(client, page, warning)

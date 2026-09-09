@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Karina VPN expiry notifier daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=karina-notifier.service
+
+[Install]
+WantedBy=timers.target

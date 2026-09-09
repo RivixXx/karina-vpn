@@ -74,6 +74,21 @@ def test_application_import_has_no_production_access(monkeypatch):
     assert callable(module.build_client_service)
 
 
+def test_subscription_issuer_and_cli_help_have_no_external_access(monkeypatch, capsys):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Issuer import/help attempted external access")
+
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.urlopen", blocked)
+    issuer = importlib.import_module("src.integrations.subscription")
+    cli = importlib.import_module("src.karina_issue")
+    assert callable(issuer.issue_subscription)
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["--help"])
+    assert exited.value.code == 0
+    assert "karina-issue" in capsys.readouterr().out
+
+
 def test_bot_import_has_no_production_access(monkeypatch):
     def blocked(*args, **kwargs):
         raise AssertionError("Bot import attempted production access")

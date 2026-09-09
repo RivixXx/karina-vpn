@@ -1,0 +1,9 @@
+[Unit]
+Description=Karina VPN expiry notifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/karina-vpn
+ExecStart=/opt/karina-vpn/.venv/bin/python -m src.notifier

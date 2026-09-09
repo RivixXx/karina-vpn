@@ -1,0 +1,14 @@
+[Unit]
+Description=Karina VPN Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/karina-vpn
+ExecStart=/opt/karina-vpn/.venv/bin/python -m src.bot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
