@@ -55,3 +55,5 @@ class ExpiringClient:
     email: str
     expiry_time_ms: int
     days_remaining: float
+    enabled: bool = True
+    expiry_text: str = ""

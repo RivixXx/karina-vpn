@@ -88,6 +88,23 @@ def test_bot_import_has_no_production_access(monkeypatch):
     assert module.BOT_TOKEN is None and module.ADMIN_TG_ID is None
 
 
+def test_notifier_import_has_no_production_access(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Notifier import attempted production access")
+
+    telegram = ModuleType("telegram")
+    telegram.Bot = type("Bot", (), {})
+    telegram.InlineKeyboardButton = type("InlineKeyboardButton", (), {})
+    telegram.InlineKeyboardMarkup = type("InlineKeyboardMarkup", (), {})
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.build_opener", blocked)
+    monkeypatch.setattr("sqlite3.connect", blocked)
+    sys.modules.pop("src.notifier", None)
+    module = importlib.import_module("src.notifier")
+    assert callable(module.run_notification_pass)
+
+
 def test_cli_formats_expected_xui_errors(monkeypatch, capsys):
     module = importlib.import_module("src.karina_user")
     monkeypatch.setattr(module, "cmd_info", lambda args: (_ for _ in ()).throw(

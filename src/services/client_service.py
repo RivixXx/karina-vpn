@@ -255,7 +255,10 @@ class ClientService:
             client = obj.get("client", {})
             expiry = int(client.get("expiryTime", 0) or 0)
             if client.get("enable", False) and expiry and now <= expiry <= limit:
-                result.append(ExpiringClient(email, expiry, (expiry - now) / 86400000))
+                result.append(ExpiringClient(
+                    email, expiry, (expiry - now) / 86400000,
+                    enabled=True, expiry_text=self._expiry_text(expiry),
+                ))
         return sorted(result, key=lambda item: item.expiry_time_ms)
 
     def delete_client(self, email) -> DeleteClientResult:

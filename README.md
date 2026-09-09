@@ -47,11 +47,16 @@ Focused fixes:
   operations and receives an already configured XUI client through dependency
   injection. XUI login remains in the lazy CLI application factory.
 - `karina_user.py` is now a CLI adapter over `ClientService`; command names and
-  stdout formats consumed by the bot and notifier remain stable.
+  stdout formats remain stable for human and administrative use.
 - `application.py` builds an authenticated `ClientService` lazily for both CLI
   and Telegram actions. Telegram uses typed results directly and no longer
-  starts `karina-user` or parses its Russian stdout. The notifier continues to
-  consume the unchanged CLI text contract.
+  starts `karina-user` or parses its Russian stdout.
+- Telegram, notifier and CLI each call `ClientService`, which owns XUI client
+  operations. `ClientService` calls the Happ integration for subscription
+  issuance. CLI text is no longer an internal application protocol.
+- SQLite retains Telegram bindings, notification delivery state and billing
+  state. Notifier deduplication writes the numeric expiry timestamp while also
+  recognizing legacy localized expiry keys.
 - `integrations/happ/subscription.py` exposes the existing Happ, Crypt5, QR and
   connection-page issuance flow as an injectable Python function;
   `karina_issue.py` remains its command-line adapter.
@@ -81,3 +86,5 @@ Known limitations:
   deletion progress is not persisted. Direct CLI deletion still has no access
   to Telegram DB and must not be used as a substitute for the admin flow.
 - Other security and billing findings from the audit remain unresolved.
+- Notification delivery uses send-then-record ordering. A process crash after
+  Telegram accepts a message but before the SQLite commit can cause a retry.

@@ -229,8 +229,12 @@ def test_expiring_selection_and_sorting(config, tmp_path):
     inbound = [{"settings": {"clients": [{"email": email} for email in clients]}}]
     service, _ = make_service(config, tmp_path, clients, inbound)
     result = service.get_expiring(2)
-    assert result == [ExpiringClient("sooner", NOW + DAY, 1.0),
-                      ExpiringClient("later", NOW + 2 * DAY, 2.0)]
+    assert [(item.email, item.expiry_time_ms, item.days_remaining, item.enabled)
+            for item in result] == [
+        ("sooner", NOW + DAY, 1.0, True),
+        ("later", NOW + 2 * DAY, 2.0, True),
+    ]
+    assert all(item.expiry_text for item in result)
 
 
 def test_delete_valid_files(config, tmp_path):
