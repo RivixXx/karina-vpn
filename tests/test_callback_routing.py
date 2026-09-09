@@ -35,7 +35,7 @@ def bot(source_functions, local_db):
     names = {
         "get_or_create_client_ref", "get_client_email_by_ref", "delete_client_ref",
         "delete_client_local_state", "client_callback", "is_private_chat", "is_admin",
-        "admin_ref_callback", "admin_user", "admin_users", "esc", "get_link_by_email",
+        "admin_ref_callback", "admin_user", "admin_users", "markdown_v2_escape", "get_link_by_email",
         "callbacks", "start", "client_keyboard", "status_text", "safe_user_error",
         "format_devices", "format_admin_stats", "format_expiring",
         "admin_bundle_user", "format_bundle_profile", "bytes_to_human",

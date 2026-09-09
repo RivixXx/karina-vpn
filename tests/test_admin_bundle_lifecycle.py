@@ -36,7 +36,10 @@ sys.modules.setdefault("telegram.constants", constants)
 sys.modules.setdefault("telegram.ext", extension)
 
 from src import bot
-from src.models import ClientBundle, ClientInfo, CreateClientBundleResult, TrafficInfo
+from src.models import (
+    ClientBundle, ClientInfo, CreateClientBundleResult, DeviceInfo,
+    TrafficInfo,
+)
 from src.services import ClientServiceError, ReconciliationRequiredError, ValidationError
 
 
@@ -86,6 +89,9 @@ def admin(monkeypatch):
         extend_client=Mock(return_value=primary), set_hwid_limit=Mock(return_value=primary),
         disable_client=Mock(return_value=primary), enable_client=Mock(return_value=primary),
         reset_bundle_devices=Mock(), remove_bundle_device=Mock(),
+        get_devices=Mock(return_value=[]),
+        get_traffic=Mock(return_value=TrafficInfo(0, 0, None, None)),
+        list_clients=Mock(return_value=[primary]), get_expiring=Mock(return_value=[]),
         connect_dir=NS(is_dir=lambda: True, exists=lambda: True),
     )
     monkeypatch.setattr(bot, "ADMIN_TG_ID", 1)
@@ -236,6 +242,86 @@ def test_admin_service_screen_is_read_only_and_private(admin):
     text = upd.callback_query.edit_message_text.call_args.args[0]
     assert "XUI API: reachable" in text and "provider absent" in text
     assert "password" not in text.lower() and "token" not in text.lower()
+
+
+RESERVED = set(r"_*[]()~`>#+-=|{}.!")
+
+
+def assert_valid_markdown_v2(text):
+    escaped = False
+    markup_counts = {"*": 0, "_": 0, "`": 0}
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char in markup_counts:
+            markup_counts[char] += 1
+        elif char in RESERVED:
+            raise AssertionError(f"unescaped MarkdownV2 character: {char!r}")
+    assert not escaped
+    assert all(count % 2 == 0 for count in markup_counts.values())
+
+
+@pytest.mark.parametrize("value", [
+    "Test-User", "Test_User", "A+B", "50.0%", "[device]", "foo(bar)",
+    "x=y", "test!", r"\#name", "{value}", "pipe|value",
+])
+def test_markdown_v2_dynamic_escape_covers_production_characters(value):
+    escaped = bot.markdown_v2_escape(value)
+    assert_valid_markdown_v2(escaped)
+
+
+def test_render_admin_home_is_valid_markdown_v2():
+    upd = update()
+    run(bot.render_admin_home(upd))
+    call = upd.callback_query.edit_message_text.call_args
+    assert call.kwargs["parse_mode"] == bot.ParseMode.MARKDOWN_V2
+    assert "HTTPS\\-выдача" in call.args[0]
+    assert_valid_markdown_v2(call.args[0])
+
+
+def test_dynamic_markdown_formatters_escape_values():
+    special = "Test-User_[device]+foo(bar)=x!{value}|"
+    item = client()
+    item = item.__class__(**{**item.__dict__, "expiry_text": special})
+    assert_valid_markdown_v2(bot.format_client_profile(item))
+    order = NS(id=special, days=30, amount_rub=100)
+    plan = NS(title=special)
+    assert_valid_markdown_v2(bot.format_billing_order(order, plan))
+
+
+def test_client_device_and_traffic_renders_escape_dynamic_values(admin):
+    special = "Test-User_[device]+foo(bar)=x!{value}|"
+    admin.get_client.return_value = client()
+    admin.get_devices.return_value = [DeviceInfo(1, special, special, special, special, 0, 0)]
+    devices_update = update("client_devices")
+    run(bot.client_devices(devices_update, "demo"))
+    device_call = devices_update.callback_query.edit_message_text.call_args
+    assert device_call.kwargs["parse_mode"] == bot.ParseMode.MARKDOWN_V2
+    assert_valid_markdown_v2(device_call.args[0])
+
+    admin.get_traffic.return_value = TrafficInfo(1024, 50 * 1024 ** 3, 50 * 1024 ** 3 - 1024, 0.1)
+    traffic_update = update("client_traffic")
+    run(bot.client_traffic(traffic_update, "demo"))
+    traffic_call = traffic_update.callback_query.edit_message_text.call_args
+    assert traffic_call.kwargs["parse_mode"] == bot.ParseMode.MARKDOWN_V2
+    assert_valid_markdown_v2(traffic_call.args[0])
+
+
+def test_application_error_handler_logs_and_replies_without_parse_mode(monkeypatch):
+    logger = NS(error=Mock(), warning=Mock())
+    monkeypatch.setattr(bot, "LOGGER", logger)
+    message = NS(reply_text=AsyncMock())
+    upd = NS(effective_message=message)
+    error = RuntimeError("technical secret")
+    run(bot.telegram_error_handler(upd, NS(error=error)))
+    logger.error.assert_called_once()
+    reply = message.reply_text.call_args
+    assert "technical secret" not in reply.args[0]
+    assert "parse_mode" not in reply.kwargs
 
 
 def test_admin_service_screen_is_read_only_and_does_not_require_client_link(admin, monkeypatch):

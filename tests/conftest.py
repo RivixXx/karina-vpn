@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SQLITE_CONNECT = sqlite3.connect
 ALLOWED = {
-    "bot.py": {"esc"},
+    "bot.py": {"markdown_v2_escape"},
 }
 
 

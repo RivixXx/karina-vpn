@@ -325,11 +325,11 @@ def format_client_profile(client: ClientInfo) -> str:
     return (
         "💗 *Карина VPN*\n\n"
         "👑 *Мой профиль*\n\n"
-        f"├ 📅 Подписка: *до {esc(client.expiry_text)}*\n"
-        f"├ 📱 Устройства: *{esc(f'{client.device_count} / {limit}')}*\n"
-        f"├ 📊 Использовано: *{esc(bytes_to_human(client.used_traffic_bytes))}*\n"
-        f"├ 🎚 Лимит: *{esc(traffic_limit_text(client.total_traffic_bytes))}*\n"
-        f"└ 🛡 VPN: {icon} *{esc(status)}*\n\n"
+        f"├ 📅 Подписка: *до {markdown_v2_escape(client.expiry_text)}*\n"
+        f"├ 📱 Устройства: *{markdown_v2_escape(f'{client.device_count} / {limit}')}*\n"
+        f"├ 📊 Использовано: *{markdown_v2_escape(bytes_to_human(client.used_traffic_bytes))}*\n"
+        f"├ 🎚 Лимит: *{markdown_v2_escape(traffic_limit_text(client.total_traffic_bytes))}*\n"
+        f"└ 🛡 VPN: {icon} *{markdown_v2_escape(status)}*\n\n"
         "✨ _Свобода быть онлайн_"
     )
 
@@ -430,8 +430,9 @@ def format_expiring(clients) -> str:
     )
 
 
-def esc(value):
+def markdown_v2_escape(value):
     value = str(value)
+    value = value.replace("\\", "\\\\")
 
     chars = r"_*[]()~`>#+-=|{}.!"
 
@@ -541,10 +542,10 @@ def billing_order_keyboard(order):
 def format_billing_order(order, plan):
     return (
         "🧾 *Заказ создан*\n\n"
-        f"Тариф: {esc(plan.title)}\n"
+        f"Тариф: {markdown_v2_escape(plan.title)}\n"
         f"Срок: {order.days} дней\n"
         f"Стоимость: {order.amount_rub} ₽\n"
-        f"Заказ: `{esc(order.id)}`"
+        f"Заказ: {markdown_v2_escape(order.id)}"
     )
 
 
@@ -552,7 +553,7 @@ async def render_client_home(update, email):
     try:
         client = build_client_service().get_client(email)
     except EXPECTED_SERVICE_ERRORS as exc:
-        text = f"❌ {esc(safe_user_error(exc))}"
+        text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
         )
@@ -583,11 +584,11 @@ async def client_devices(update, email):
         if client is None:
             text = "❌ Подписка не найдена\\."
         else:
-            text = "📱 *Мои устройства*\n\n```text\n" + format_devices(
+            text = "📱 *Мои устройства*\n\n" + markdown_v2_escape(format_devices(
                 service.get_devices(email), client.device_limit
-            ) + "\n```"
+            ))
     except EXPECTED_SERVICE_ERRORS as exc:
-        text = f"❌ {esc(safe_user_error(exc))}"
+        text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -616,9 +617,9 @@ async def client_devices(update, email):
 async def client_traffic(update, email):
     try:
         output = format_traffic(build_client_service().get_traffic(email))
-        text = "📊 *Использование VPN*\n\n" f"```text\n{output}\n```"
+        text = "📊 *Использование VPN*\n\n" + markdown_v2_escape(output)
     except EXPECTED_SERVICE_ERRORS as exc:
-        text = f"❌ {esc(safe_user_error(exc))}"
+        text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -716,7 +717,7 @@ async def render_admin_home(update):
         "👑 *Администратор*\n\n"
         "🔐 Серверы работают\n"
         "📱 HWID контроль активен\n"
-        "🔗 Прямая HTTPS-выдача включена\n\n"
+        "🔗 Прямая HTTPS\\-выдача включена\n\n"
         "Выбери действие 👇"
     )
 
@@ -740,7 +741,7 @@ async def admin_users(update):
         clients = build_client_service().list_clients()
     except EXPECTED_SERVICE_ERRORS as exc:
         await update.callback_query.edit_message_text(
-            f"❌ {esc(safe_user_error(exc, admin=True))}"
+            f"❌ {markdown_v2_escape(safe_user_error(exc, admin=True))}"
         )
         return
     rows = []
@@ -784,7 +785,7 @@ async def admin_user(update, email):
         client = build_client_service().get_client(email)
     except EXPECTED_SERVICE_ERRORS as exc:
         await update.callback_query.edit_message_text(
-            f"❌ {esc(safe_user_error(exc, admin=True))}"
+            f"❌ {markdown_v2_escape(safe_user_error(exc, admin=True))}"
         )
         return
     if client is None:
@@ -812,10 +813,10 @@ async def admin_user(update, email):
 
     text = (
         "👑 *Пользователь*\n\n"
-        f"👤 *{esc(email)}*\n"
-        f"📅 {esc(client.expiry_text)}\n"
-        f"📱 {esc(str(client.device_count) + ' / ' + str(client.device_limit or '∞'))}\n"
-        f"🛡 {esc(status_text(client.status))}\n\n"
+        f"👤 *{markdown_v2_escape(email)}*\n"
+        f"📅 {markdown_v2_escape(client.expiry_text)}\n"
+        f"📱 {markdown_v2_escape(str(client.device_count) + ' / ' + str(client.device_limit or '∞'))}\n"
+        f"🛡 {markdown_v2_escape(status_text(client.status))}\n\n"
         f"{telegram_text}"
     )
 
@@ -1025,9 +1026,9 @@ async def create_bind_link(
 
     text = (
         "🔗 *Привязка Telegram*\n\n"
-        f"Пользователь: *{esc(email)}*\n\n"
+        f"Пользователь: *{markdown_v2_escape(email)}*\n\n"
         "Отправь клиенту эту одноразовую ссылку:\n\n"
-        f"`{esc(link)}`\n\n"
+        f"{markdown_v2_escape(link)}\n\n"
         "⏳ Ссылка действует 24 часа\\."
     )
 
@@ -1233,6 +1234,21 @@ async def admin_bundle_action_callback(update, context, data):
         await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
 
 
+async def telegram_error_handler(update, context):
+    error = context.error
+    LOGGER.error(
+        "Unhandled Telegram update exception",
+        exc_info=(type(error), error, error.__traceback__) if error else None,
+    )
+    message = getattr(update, "effective_message", None) if update else None
+    if message is None:
+        return
+    try:
+        await message.reply_text("Произошла ошибка. Попробуйте ещё раз позже.")
+    except Exception:
+        LOGGER.warning("Unable to send safe Telegram error response", exc_info=True)
+
+
 # ============================================================
 # START
 # ============================================================
@@ -1367,7 +1383,7 @@ async def callbacks(
 
             await query.edit_message_text(
                 "📊 *Статистика*\n\n"
-                f"```text\n{output}\n```",
+                f"{markdown_v2_escape(output)}",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
@@ -1390,7 +1406,7 @@ async def callbacks(
 
             await query.edit_message_text(
                 "⏰ *Заканчиваются за 7 дней*\n\n"
-                f"```text\n{output}\n```",
+                f"{markdown_v2_escape(output)}",
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [
@@ -1580,6 +1596,8 @@ def main():
             callbacks,
         )
     )
+
+    app.add_error_handler(telegram_error_handler)
 
     app.run_polling(
         allowed_updates=Update.ALL_TYPES

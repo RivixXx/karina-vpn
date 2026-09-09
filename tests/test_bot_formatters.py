@@ -3,7 +3,7 @@ from src.models import ClientInfo, DeviceInfo, TrafficInfo
 
 def load_formatters(source_functions):
     names = {
-        "esc", "bytes_to_human", "traffic_limit_text", "status_text",
+        "markdown_v2_escape", "bytes_to_human", "traffic_limit_text", "status_text",
         "format_client_profile", "format_devices", "format_traffic", "safe_user_error",
     }
     return source_functions("bot.py", names, LOGGER=type("Log", (), {"warning": lambda *a, **k: None})())
@@ -45,4 +45,4 @@ def test_safe_errors_hide_details(source_functions):
 
 
 def test_markdown_escape(source_functions):
-    assert load_formatters(source_functions)["esc"]("demo_client. (1)!") == r"demo\_client\. \(1\)\!"
+    assert load_formatters(source_functions)["markdown_v2_escape"]("demo_client. (1)!") == r"demo\_client\. \(1\)\!"
