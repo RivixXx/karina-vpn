@@ -36,6 +36,19 @@ def test_direct_script_import_is_safe(monkeypatch):
     assert module.CONFIG.as_posix() == "/etc/karina-vpn/config.env"
 
 
+def test_client_service_import_has_no_production_access(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Service import attempted production access")
+
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.build_opener", blocked)
+    monkeypatch.setattr("sqlite3.connect", blocked)
+    monkeypatch.setattr("subprocess.Popen", blocked)
+    module = importlib.import_module("src.services.client_service")
+    importlib.reload(module)
+    assert module.ClientService.__name__ == "ClientService"
+
+
 def test_cli_formats_expected_xui_errors(monkeypatch, capsys):
     module = importlib.import_module("src.karina_user")
     monkeypatch.setattr(module, "cmd_info", lambda args: (_ for _ in ()).throw(

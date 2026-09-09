@@ -40,16 +40,14 @@ def test_expiring_cli_suffix(fixture_text):
 @pytest.mark.parametrize("length", [2, 4, 17, 18, 32, 64])
 def test_real_list_formatter_round_trips_to_bot(length, source_functions, pure_functions, capsys):
     name = "n" * length
+    client = SimpleNamespace(
+        email=name, status="active", device_count=1, device_limit=2,
+        used_traffic_bytes=0, total_traffic_bytes=0, expiry_time_ms=0,
+    )
     functions = source_functions(
         "karina_user.py", {"cmd_list"},
-        create_api=lambda: (SimpleNamespace(), SimpleNamespace()),
-        collect_client_names=lambda api: [name],
-        get_client_full=lambda api, email: {
-            "obj": {"usedTraffic": 0},
-            "client": {"limitHwid": 2, "totalGB": 0, "expiryTime": 0},
-            "devices": ["synthetic_device"],
-        },
-        get_status=lambda client: "🟢 Активен",
+        build_service=lambda: SimpleNamespace(list_clients=lambda: [client]),
+        status_text=lambda status: "🟢 Активен",
         bytes_to_human=lambda value: "500 МБ",
         bytes_to_gb=lambda value: "∞",
         fmt_date_short=lambda value: "01.10.2030",

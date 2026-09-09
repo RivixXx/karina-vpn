@@ -25,16 +25,15 @@ python -m compileall src
 
 Tests must not call production XUI, Happ or Telegram.
 
-The harness reads source text and compiles explicitly selected functions
-through AST. It never imports legacy modules: their top-level code reads
-production configuration or executes commands. Tests block socket connections,
-subprocesses and SQLite connections. Lifecycle tests alone use a connection
-factory restricted to a synthetic database in pytest's `tmp_path`.
+The harness imports the configuration, XUI integration, client service and CLI
+safely. A few focused parser and CLI contract tests still compile selected
+functions through AST. Tests block socket connections, subprocesses and SQLite
+connections. Lifecycle tests alone use a connection factory restricted to a
+synthetic database in pytest's `tmp_path`.
 
 The suite checks text contracts and local SQLite lifecycle, not live integration
-behavior. The list formatter runs with in-memory dependencies; the real CLI
-is not imported or launched. Replace AST loading
-with normal imports only once imports become safe in a future task.
+behavior. Client service and list formatter tests use in-memory dependencies;
+the CLI is imported but never launched against production services.
 
 Focused fixes:
 
@@ -43,6 +42,12 @@ Focused fixes:
 - `integrations/xui` owns the existing urllib cookie, CSRF and endpoint flow.
   It raises typed errors without printing or exiting; the CLI converts expected
   config and XUI failures to the existing `Ошибка: ...` output.
+- `models/client.py` defines typed client, device, traffic, creation, deletion
+  and expiry results. `services/client_service.py` owns client business
+  operations and receives an already configured XUI client through dependency
+  injection. XUI login remains in the lazy CLI application factory.
+- `karina_user.py` is now a CLI adapter over `ClientService`; command names and
+  stdout formats consumed by the bot and notifier remain stable.
 - CLI list columns now have explicit two-space separators, including for
   names of 18, 32 and 64 characters. The bot parser needs no regex changes.
 - `client_refs` maps persistent integer IDs to client names. Startup creates
