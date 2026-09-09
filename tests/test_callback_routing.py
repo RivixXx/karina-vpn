@@ -38,6 +38,7 @@ def bot(source_functions, local_db):
         "admin_ref_callback", "admin_user", "admin_users", "esc", "get_link_by_email",
         "callbacks", "start", "client_keyboard", "status_text", "safe_user_error",
         "format_devices", "format_admin_stats", "format_expiring",
+        "admin_bundle_user", "format_bundle_profile", "bytes_to_human",
     }
 
     def connect():
@@ -47,10 +48,15 @@ def bot(source_functions, local_db):
 
     service = NS(
         get_client=Mock(side_effect=lambda email: client(email)),
+        get_client_bundle=Mock(side_effect=lambda email: NS(primary=client(email), mobile=None)),
+        get_mobile_traffic=Mock(return_value=None),
         list_clients=Mock(return_value=[client()]),
         get_devices=Mock(return_value=[]),
+        get_bundle_devices=Mock(return_value=[]),
+        ensure_connection=Mock(return_value="https://example.test/connect/fresh.html"),
         get_expiring=Mock(return_value=[]),
         delete_client=Mock(return_value=client()),
+        delete_client_bundle=Mock(return_value=client()),
     )
     functions = source_functions(
         "bot.py", names, db_connect=connect, closing=closing, sqlite3=sqlite3,
@@ -109,18 +115,27 @@ def test_admin_list_uses_client_service_and_long_ref(bot):
     assert values and all(email not in value and len(value.encode()) <= 64 for value in values)
 
 
+def test_admin_connection_repairs_before_showing_url(bot):
+    ref = bot["get_or_create_client_ref"]("demo_target")
+    upd = invoke(bot, f"uc:{ref}")
+    bot["_service"].ensure_connection.assert_called_once_with("demo_target")
+    rows = upd.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+    assert any(getattr(item, "url", "") == "https://example.test/connect/fresh.html"
+               for row in rows for item in row)
+
+
 @pytest.mark.parametrize("warning", [None, "cleanup skipped"])
 def test_delete_success_and_double_callback(bot, local_db, warning):
     ref = bot["get_or_create_client_ref"]("demo_target")
     other_ref = bot["get_or_create_client_ref"]("demo_other")
     before = state(local_db)
-    bot["_service"].delete_client.return_value = client(warning=warning)
+    bot["_service"].delete_client_bundle.return_value = client(warning=warning)
     context = NS(user_data={})
     invoke(bot, f"udel:{ref}", context)
-    bot["_service"].delete_client.assert_not_called()
+    bot["_service"].delete_client_bundle.assert_not_called()
     invoke(bot, f"uy:{ref}", context)
     after = state(local_db)
-    bot["_service"].delete_client.assert_called_once_with("demo_target")
+    bot["_service"].delete_client_bundle.assert_called_once_with("demo_target")
     assert len(after["telegram_links"]) == 1 and after["telegram_links"][0][1] == "demo_other"
     assert all(row[1] == "demo_other" for row in after["bind_tokens"])
     assert after["orders"] == before["orders"]
@@ -128,13 +143,13 @@ def test_delete_success_and_double_callback(bot, local_db, warning):
     assert bot["get_client_email_by_ref"](ref) is None
     assert bot["get_client_email_by_ref"](other_ref) == "demo_other"
     invoke(bot, f"uy:{ref}", context)
-    assert bot["_service"].delete_client.call_count == 1
+    assert bot["_service"].delete_client_bundle.call_count == 1
 
 
 def test_service_delete_failure_preserves_local_access(bot, local_db):
     ref = bot["get_or_create_client_ref"]("demo_target")
     before = state(local_db)
-    bot["_service"].delete_client.side_effect = RuntimeError("synthetic")
+    bot["_service"].delete_client_bundle.side_effect = RuntimeError("synthetic")
     context = NS(user_data={})
     invoke(bot, f"udel:{ref}", context)
     invoke(bot, f"uy:{ref}", context)
@@ -152,14 +167,14 @@ def test_local_failure_rolls_back_and_retries_without_service_delete(bot, local_
     with closing(local_db()) as db, db:
         db.execute("DROP TRIGGER fail_ref")
     invoke(bot, f"uy:{ref}", context)
-    assert bot["_service"].delete_client.call_count == 1
+    assert bot["_service"].delete_client_bundle.call_count == 1
     assert bot["get_client_email_by_ref"](ref) is None
 
 
 def test_stale_service_client_is_safe(bot):
     ref = bot["get_or_create_client_ref"]("demo_target")
-    bot["_service"].get_client.side_effect = None
-    bot["_service"].get_client.return_value = None
+    bot["_service"].get_client_bundle.side_effect = None
+    bot["_service"].get_client_bundle.return_value = None
     upd = invoke(bot, f"u:{ref}")
     assert "больше не существует" in upd.callback_query.edit_message_text.call_args.args[0]
 
@@ -178,7 +193,7 @@ def test_non_admin_cannot_delete(bot, local_db):
     before = state(local_db)
     invoke(bot, f"uy:{ref}", user=2)
     assert state(local_db) == before
-    bot["_service"].delete_client.assert_not_called()
+    bot["_service"].delete_client_bundle.assert_not_called()
 
 
 def test_confirm_without_prompt_does_not_delete(bot):

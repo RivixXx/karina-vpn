@@ -11,7 +11,7 @@ from src.models import (
 )
 from src.services import (
     ClientAlreadyExistsError, ClientNotFoundError, ClientService,
-    ClientServiceError, ValidationError,
+    ClientServiceError, ReconciliationRequiredError, ValidationError,
 )
 
 
@@ -161,7 +161,7 @@ def test_create_duplicate(config, tmp_path):
 
 @pytest.mark.parametrize(("custom", "expected"), [(None, 2), (0, 0), (7, 7)])
 def test_create_hwid_default_and_custom(config, tmp_path, custom, expected):
-    service, xui = make_service(config, tmp_path)
+    service, xui = make_service(config, tmp_path, issue=lambda sub_id: f"page/{sub_id}")
     service.create_client("demo", hwid_limit=custom)
     assert xui.created_payload["client"]["limitHwid"] == expected
 
@@ -337,7 +337,7 @@ def test_create_mobile_bundle(config, tmp_path):
     config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
                                 "mobile_inbound_id": 5,
                                 "mobile_traffic_bytes": 53687091200})
-    service, xui = make_service(config, tmp_path)
+    service, xui = make_service(config, tmp_path, issue=lambda sub_id: f"page/{sub_id}")
     result = service.create_client_bundle("Mikhail")
     primary, mobile = result.bundle.primary, result.bundle.mobile
     assert primary.inbound_ids == (2, 3, 4) and primary.total_traffic_bytes == 0
@@ -443,3 +443,111 @@ def test_xui_error_is_translated_with_cause(config, tmp_path):
     with pytest.raises(ClientServiceError) as caught:
         service.get_client("demo")
     assert isinstance(caught.value.__cause__, XUIOperationError)
+
+
+def bundle_clients():
+    return {
+        "demo": raw_client("demo", expiry=NOW + DAY, hwid=2, inbounds=(1, 2)),
+        "demo__mobile": raw_client(
+            "demo__mobile", expiry=NOW + DAY, hwid=2, traffic=50 * 1024 ** 3,
+            used=1024 ** 2, sub_id="mobile_id123", inbounds=(5,),
+        ),
+    }
+
+
+def test_unlimited_bundle_and_issuer_failure_contract(config, tmp_path):
+    service, xui = make_service(config, tmp_path, issue=lambda sub_id: f"page/{sub_id}")
+    result = service.create_client_bundle("demo", days=None, hwid_limit=0)
+    assert result.bundle.primary.expiry_time_ms == 0
+    assert result.bundle.mobile.expiry_time_ms == 0
+    assert result.bundle.primary.device_limit == result.bundle.mobile.device_limit == 0
+
+    service, _ = make_service(config, tmp_path, issue=lambda _: (_ for _ in ()).throw(OSError()))
+    with pytest.raises(ReconciliationRequiredError):
+        service.create_client_bundle("other")
+
+
+def test_bundle_extend_hwid_toggle_and_mobile_traffic(config, tmp_path):
+    service, xui = make_service(config, tmp_path, bundle_clients())
+    extended = service.extend_client("demo", 30)
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == extended.expiry_time_ms
+    service.set_hwid_limit("demo", 5)
+    assert xui.clients["demo"]["client"]["limitHwid"] == 5
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 5
+    service.disable_client("demo")
+    assert not xui.clients["demo"]["client"]["enable"]
+    assert not xui.clients["demo__mobile"]["client"]["enable"]
+    service.enable_client("demo")
+    assert xui.clients["demo"]["client"]["enable"]
+    assert xui.clients["demo__mobile"]["client"]["enable"]
+    traffic = service.get_mobile_traffic("demo")
+    assert traffic.used_bytes == 1024 ** 2 and traffic.limit_bytes == 50 * 1024 ** 3
+
+
+def test_bundle_devices_are_merged_and_mutated_without_mobile_name(config, tmp_path):
+    raw = lambda identifier, model: {"id": identifier, "deviceModel": model}
+    service, xui = make_service(
+        config, tmp_path, bundle_clients(),
+        devices={"demo": [raw(1, "one"), raw(2, "shared")],
+                 "demo__mobile": [raw(9, "shared"), raw(3, "three")]},
+    )
+    assert [item.id for item in service.get_bundle_devices("demo")] == [1, 2, 3]
+    service.remove_bundle_device("demo", 2)
+    assert xui.removed_devices == [("demo", 2), ("demo__mobile", 9)]
+    service.reset_bundle_devices("demo")
+    assert xui.reset == ["demo", "demo__mobile"]
+
+
+def test_connection_uses_fresh_authoritative_subid(config, tmp_path):
+    issued = []
+    clients = {"demo": raw_client("demo", sub_id="actual_readback123")}
+    service, _ = make_service(
+        config, tmp_path, clients,
+        issue=lambda sub_id: issued.append(sub_id) or f"page/{sub_id}",
+    )
+    assert service.ensure_connection("demo") == "page/actual_readback123"
+    assert issued == ["actual_readback123"]
+
+
+def test_bundle_delete_mobile_then_primary(config, tmp_path):
+    for sub_id in ("safe_id123", "mobile_id123"):
+        (tmp_path / f"{sub_id}.html").write_text("page", encoding="utf-8")
+    clients = bundle_clients()
+    service, xui = make_service(config, tmp_path, clients)
+    result = service.delete_client_bundle("demo")
+    assert result.removed
+    assert xui.deleted == ["demo__mobile", "demo"]
+    assert not list(tmp_path.glob("*.html"))
+
+
+def test_bundle_delete_partial_failure_requires_reconciliation(config, tmp_path):
+    service, xui = make_service(config, tmp_path, bundle_clients())
+    original = xui.delete_client
+
+    def fail_primary(email):
+        if email == "demo":
+            raise XUIOperationError("synthetic")
+        original(email)
+
+    xui.delete_client = fail_primary
+    with pytest.raises(ReconciliationRequiredError):
+        service.delete_client_bundle("demo")
+    assert xui.deleted == ["demo__mobile"]
+
+
+@pytest.mark.parametrize("operation", ["hwid", "toggle"])
+def test_bundle_partial_updates_require_reconciliation(config, tmp_path, operation):
+    service, xui = make_service(config, tmp_path, bundle_clients())
+    original = xui.update_client
+
+    def fail_mobile(email, payload):
+        if email.endswith("__mobile"):
+            raise XUIOperationError("synthetic")
+        original(email, payload)
+
+    xui.update_client = fail_mobile
+    with pytest.raises(ReconciliationRequiredError):
+        if operation == "hwid":
+            service.set_hwid_limit("demo", 3)
+        else:
+            service.disable_client("demo")

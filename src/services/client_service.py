@@ -236,10 +236,11 @@ class ClientService:
             mobile_email = mobile_email_for(email)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
-        days = self._positive_days(days)
+        if days is not None:
+            days = self._positive_days(days)
         if self.get_client(email) or self.get_client(mobile_email):
             raise ClientAlreadyExistsError(f"client {email} already exists")
-        expiry = self.now_provider() + days * 86400000
+        expiry = 0 if days is None else self.now_provider() + days * 86400000
         limit = self.config.default_hwid_limit if hwid_limit is None else self._hwid_limit(hwid_limit)
         primary = mobile = None
         try:
@@ -263,7 +264,14 @@ class ClientService:
             if rollback_errors:
                 raise ReconciliationRequiredError("bundle rollback incomplete") from exc
             raise
-        page = self.issue_subscription(primary.sub_id) if self.issue_subscription else None
+        try:
+            page = self.issue_subscription(primary.sub_id) if self.issue_subscription else None
+            if not page:
+                raise ClientServiceError("subscription issuer returned no verified page")
+        except Exception as exc:
+            raise ReconciliationRequiredError(
+                "bundle created but connection issuance failed"
+            ) from exc
         return CreateClientBundleResult(ClientBundle(primary, mobile), page)
 
     def get_client_bundle(self, email):
@@ -377,14 +385,15 @@ class ClientService:
     def extend_client(self, email, days) -> ClientInfo:
         days = self._positive_days(days)
         now = self.now_provider()
-        primary = self._update(email, lambda client: client.__setitem__(
-            "expiryTime", max(int(client.get("expiryTime", 0) or 0), now) + days * 86400000
-        ))
         try:
             mobile_email = mobile_email_for(email)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
-        if self.get_client(mobile_email):
+        mobile_exists = self.get_client(mobile_email) is not None
+        primary = self._update(email, lambda client: client.__setitem__(
+            "expiryTime", max(int(client.get("expiryTime", 0) or 0), now) + days * 86400000
+        ))
+        if mobile_exists:
             try:
                 self._update(mobile_email, lambda client: client.__setitem__(
                     "expiryTime", primary.expiry_time_ms
@@ -402,9 +411,10 @@ class ClientService:
         return self._set_bundle_enabled(email, False)
 
     def _set_bundle_enabled(self, email, enabled):
-        primary = self._update(email, lambda client: client.__setitem__("enable", enabled))
         mobile_email = mobile_email_for(email)
-        if self.get_client(mobile_email):
+        mobile_exists = self.get_client(mobile_email) is not None
+        primary = self._update(email, lambda client: client.__setitem__("enable", enabled))
+        if mobile_exists:
             try:
                 self._update(mobile_email, lambda client: client.__setitem__("enable", enabled))
             except ClientServiceError as exc:
@@ -421,7 +431,85 @@ class ClientService:
 
     def set_hwid_limit(self, email, limit) -> ClientInfo:
         limit = self._hwid_limit(limit)
-        return self._update(email, lambda client: client.__setitem__("limitHwid", limit))
+        mobile_email = mobile_email_for(email)
+        mobile_exists = self.get_client(mobile_email) is not None
+        primary = self._update(email, lambda client: client.__setitem__("limitHwid", limit))
+        if mobile_exists:
+            try:
+                self._update(mobile_email, lambda client: client.__setitem__("limitHwid", limit))
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "primary HWID updated but mobile synchronization failed"
+                ) from exc
+        return primary
+
+    def get_bundle_devices(self, email) -> list[DeviceInfo]:
+        primary = self.get_devices(email)
+        mobile_email = mobile_email_for(email)
+        mobile = self.get_devices(mobile_email) if self.get_client(mobile_email) else []
+        unique = {}
+        for device in primary + mobile:
+            unique.setdefault(self._logical_device_key(device), device)
+        return list(unique.values())
+
+    @staticmethod
+    def _logical_device_key(device):
+        identity = (device.model, device.os_name, device.os_version, device.user_agent)
+        return identity if any(identity) else ("device-id", device.id)
+
+    def remove_bundle_device(self, email, device_id) -> None:
+        if type(device_id) is not int:
+            raise ValidationError("ID устройства должен быть числом")
+        credentials = [email]
+        mobile_email = mobile_email_for(email)
+        if self.get_client(mobile_email):
+            credentials.append(mobile_email)
+        by_credential = {credential: self.get_devices(credential) for credential in credentials}
+        target = next((item for devices in by_credential.values() for item in devices
+                       if item.id == device_id), None)
+        if target is None:
+            raise ValidationError("устройство не найдено")
+        target_key = self._logical_device_key(target)
+        matching = [(credential, item.id) for credential, devices in by_credential.items()
+                    for item in devices if self._logical_device_key(item) == target_key]
+        completed = False
+        for credential, matching_id in matching:
+            try:
+                self.remove_device(credential, matching_id)
+                completed = True
+            except ClientServiceError as exc:
+                if completed:
+                    raise ReconciliationRequiredError(
+                        "device removed from only part of bundle"
+                    ) from exc
+                raise
+
+    def reset_bundle_devices(self, email) -> None:
+        mobile_email = mobile_email_for(email)
+        mobile_exists = self.get_client(mobile_email) is not None
+        self.reset_devices(email)
+        if mobile_exists:
+            try:
+                self.reset_devices(mobile_email)
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "primary devices reset but mobile reset failed"
+                ) from exc
+
+    def ensure_connection(self, email) -> str:
+        _, obj = self._require_raw(email)
+        sub_id = str(obj.get("client", {}).get("subId") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,128}", sub_id):
+            raise ClientServiceError("authoritative SUB_ID is missing or invalid")
+        if self.issue_subscription is None:
+            raise ClientServiceError("subscription issuer is not configured")
+        try:
+            page = self.issue_subscription(sub_id)
+        except Exception as exc:
+            raise ClientServiceError("subscription issuance failed") from exc
+        if not page:
+            raise ClientServiceError("subscription verification failed")
+        return page
 
     def get_traffic(self, email) -> TrafficInfo:
         _, obj = self._require_raw(email)
@@ -508,3 +596,24 @@ class ClientService:
             removed=True,
             file_cleanup_warning="; ".join(warnings) or None,
         )
+
+    def delete_client_bundle(self, email) -> DeleteClientResult:
+        email = self.validate_email(email)
+        mobile_email = mobile_email_for(email)
+        warnings = []
+        mobile = self.get_client(mobile_email)
+        if mobile:
+            result = self.delete_client(mobile_email)
+            if result.file_cleanup_warning:
+                warnings.append(result.file_cleanup_warning)
+        try:
+            result = self.delete_client(email)
+        except ClientServiceError as exc:
+            if mobile:
+                raise ReconciliationRequiredError(
+                    "mobile deleted but primary deletion failed"
+                ) from exc
+            raise
+        if result.file_cleanup_warning:
+            warnings.append(result.file_cleanup_warning)
+        return DeleteClientResult(email, True, "; ".join(warnings) or None)

@@ -197,6 +197,45 @@ users, call `crypto.happ.su`, or modify files in `/var/www/karina/connect` in
 bulk. Mobile migration remains a separate, explicit per-user operation and is
 never started by deployment.
 
+## Telegram administration
+
+Telegram is the recommended interface for routine administration. The admin
+menu creates and manages a primary/mobile bundle without exposing internal
+credential names, UUIDs, subscription IDs, raw XUI data, or credentials.
+
+Operator workflow:
+
+1. **Create user:** choose `Создать`, enter a primary name, select the term and
+   HWID policy, review the confirmation, and create exactly one bundle. New
+   bundles receive the configured primary inbounds with unlimited traffic and
+   a mobile credential with the configured 50 GiB quota.
+2. **Bind Telegram:** open the profile and create a one-time binding link.
+   Rebinding invalidates older unused tokens.
+3. **Open connection:** use `Подключение`. The service reads the current primary
+   credential from XUI, uses its authoritative `SUB_ID`, repairs and verifies
+   the direct QR/HTML artifacts, and only then returns the connection page.
+4. **Extend:** select 30, 90, 180, or 365 days. Primary and mobile receive the
+   same absolute expiry timestamp.
+5. **Change HWID:** select 1, 2, 3, 5, or unlimited. One logical HWID policy is
+   applied to both credentials.
+6. **Manage devices:** view a merged bundle-level list, remove one logical
+   device, or reset devices across both credentials.
+7. **Disable or enable:** the toggle applies to the complete bundle.
+8. **Delete:** confirm the operation separately. Mobile and primary VPN access,
+   generated artifacts, Telegram binding, bind tokens, and callback reference
+   are removed. Orders and notification history remain.
+9. **Migrate legacy mobile:** review the per-user dry-run plan, then use a second
+   confirmation to apply it. There is no bulk or automatic migration action.
+
+Partial bundle mutations return a reconciliation warning and are not retried
+automatically. Creation sessions are private, administrator-scoped, expire
+after ten minutes, and are consumed before the final mutation. Numeric client
+references keep names and internal identifiers out of callback data.
+
+The 3x-ui panel and `karina-user` CLI remain maintenance and emergency tools.
+Admin manual extension is independent of billing orders and does not change the
+billing plan prices or order state machine.
+
 ## Backup
 
 Run `bash scripts/backup-production.sh` as root before the first deployment and

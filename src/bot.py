@@ -17,22 +17,30 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 try:
     from .app_config import ConfigError
     from .application import build_client_service
     from .integrations.xui import XUIError
-    from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo
+    from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
     from .repositories import BillingRepository
-    from .services import BillingAccessError, BillingError, BillingService, ClientServiceError
+    from .services import (
+        BillingAccessError, BillingError, BillingService, ClientServiceError,
+        ReconciliationRequiredError, ValidationError,
+    )
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError
     from application import build_client_service
     from integrations.xui import XUIError
-    from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo
+    from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
     from repositories import BillingRepository
-    from services import BillingAccessError, BillingError, BillingService, ClientServiceError
+    from services import (
+        BillingAccessError, BillingError, BillingService, ClientServiceError,
+        ReconciliationRequiredError, ValidationError,
+    )
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -376,6 +384,43 @@ def format_admin_stats(clients) -> str:
     )
 
 
+def format_bundle_profile(bundle, mobile_traffic) -> str:
+    primary = bundle.primary
+    status_icon = {"active": "🟢", "expired": "🟠"}.get(primary.status, "🔴")
+    expiry = "безлимит" if not primary.expiry_time_ms else primary.expiry_text
+    lines = [
+        f"👤 {primary.email}", "", f"{status_icon} {status_text(primary.status)}",
+        f"📅 Срок: {expiry}", f"📱 HWID: {primary.device_limit or '∞'}", "",
+        "🌐 Основной VPN", "Безлимит", "", "📡 Карина против глушилок",
+    ]
+    if bundle.mobile is None or mobile_traffic is None:
+        lines.append("Отдельный мобильный лимит ещё не активирован.")
+    elif mobile_traffic.limit_bytes and mobile_traffic.percent_used is not None:
+        lines.extend([
+            f"{bytes_to_human(mobile_traffic.used_bytes)} / {bytes_to_human(mobile_traffic.limit_bytes)}",
+            f"Осталось: {bytes_to_human(mobile_traffic.remaining_bytes)}",
+            f"Использовано: {mobile_traffic.percent_used:.1f}%",
+        ])
+    else:
+        lines.append("⚠️ Мобильный лимит требует проверки.")
+    return "\n".join(lines)
+
+
+def format_migration_plan(plan) -> str:
+    if plan.already_migrated:
+        return "✅ Мобильный доступ уже активирован."
+    lines = ["📱 План активации 50 ГБ", ""]
+    if plan.needs_mobile_create:
+        lines.append("CREATE mobile")
+    if plan.needs_external_link_update:
+        lines.append("LINK+VERIFY")
+    if plan.needs_primary_detach:
+        lines.append("DETACH inbound")
+    lines.extend(f"⚠️ {warning}" for warning in plan.warnings)
+    lines.extend(f"⛔ {error}" for error in plan.blocking_errors)
+    return "\n".join(lines)
+
+
 def format_expiring(clients) -> str:
     if not clients:
         return "Таких подписок нет."
@@ -660,6 +705,7 @@ def admin_home_keyboard():
                     callback_data="admin_stats",
                 ),
             ],
+            [InlineKeyboardButton("🔧 Сервис", callback_data="admin_service")],
         ]
     )
 
@@ -670,7 +716,7 @@ async def render_admin_home(update):
         "👑 *Администратор*\n\n"
         "🔐 Серверы работают\n"
         "📱 HWID контроль активен\n"
-        "🔒 Crypt5 включён\n\n"
+        "🔗 Прямая HTTPS-выдача включена\n\n"
         "Выбери действие 👇"
     )
 
@@ -810,6 +856,40 @@ async def admin_user(update, email):
     )
 
 
+async def admin_bundle_user(update, email):
+    try:
+        service = build_client_service()
+        bundle = service.get_client_bundle(email)
+        traffic = service.get_mobile_traffic(email) if bundle and bundle.mobile else None
+    except EXPECTED_SERVICE_ERRORS as exc:
+        await update.callback_query.edit_message_text(safe_user_error(exc, admin=True))
+        return
+    if bundle is None:
+        await update.callback_query.edit_message_text("Пользователь больше не существует")
+        return
+    ref_id = get_or_create_client_ref(email)
+    linked = get_link_by_email(email)
+    bind_text = "🔄 Перепривязать Telegram" if linked else "🔗 Привязать Telegram"
+    toggle = "⛔ Отключить" if bundle.primary.enabled else "✅ Включить"
+    rows = [
+        [InlineKeyboardButton("🔑 Подключение", callback_data=f"uc:{ref_id}"),
+         InlineKeyboardButton("📱 Устройства", callback_data=f"ud:{ref_id}")],
+        [InlineKeyboardButton("⏳ Продлить", callback_data=f"ue:{ref_id}"),
+         InlineKeyboardButton("🎚 HWID", callback_data=f"uh:{ref_id}")],
+        [InlineKeyboardButton(toggle, callback_data=f"ut:{ref_id}")],
+        [InlineKeyboardButton(bind_text, callback_data=f"ub:{ref_id}")],
+    ]
+    if bundle.mobile is None:
+        rows.append([InlineKeyboardButton("📱 Активировать 50 ГБ", callback_data=f"um:{ref_id}")])
+    rows.extend([
+        [InlineKeyboardButton("🗑 Удалить", callback_data=f"udel:{ref_id}")],
+        [InlineKeyboardButton("⬅ Назад", callback_data="admin_users")],
+    ])
+    await update.callback_query.edit_message_text(
+        format_bundle_profile(bundle, traffic), reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
 async def admin_ref_callback(update, context, data):
     if not is_private_chat(update) or not is_admin(update):
         return
@@ -821,6 +901,10 @@ async def admin_ref_callback(update, context, data):
         await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
         return
     action, ref_id = match[1], int(match[2])
+    if action == "u":
+        context.user_data.pop("delete_confirmation", None)
+        await admin_bundle_user(update, email)
+        return
     # Keep a successful service result for retry if SQLite cleanup fails.
     pending = context.user_data.get("deleted_vpn")
     retry_cleanup = action == "uy" and pending and pending["ref"] == ref_id
@@ -836,19 +920,27 @@ async def admin_ref_callback(update, context, data):
         if client is None:
             await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
             return
-    if action == "u":
-        await admin_user(update, email)
-    elif action == "ub":
+    if action == "ub":
         await create_bind_link(update, context, email)
     elif action in {"ud", "uc"}:
         rows = [[InlineKeyboardButton("⬅️ Профиль", callback_data=f"u:{ref_id}")]]
         if action == "ud":
             try:
-                text = format_devices(service.get_devices(email), client.device_limit)
+                devices = service.get_bundle_devices(email)
+                text = format_devices(devices, client.device_limit)
+                rows = [[InlineKeyboardButton(
+                    f"Удалить устройство {device.id}", callback_data=f"ur{device.id}:{ref_id}",
+                )] for device in devices]
+                rows.append([InlineKeyboardButton("Сбросить все устройства", callback_data=f"uda:{ref_id}")])
+                rows.append([InlineKeyboardButton("⬅ Профиль", callback_data=f"u:{ref_id}")])
             except EXPECTED_SERVICE_ERRORS as exc:
                 text = safe_user_error(exc, admin=True)
         else:
-            url = client.connect_url
+            try:
+                url = service.ensure_connection(email)
+            except EXPECTED_SERVICE_ERRORS as exc:
+                await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
+                return
             if url:
                 rows.insert(0, [InlineKeyboardButton("💗 Подключить Карина VPN", url=url)])
             text = "🔗 Подключение"
@@ -871,7 +963,7 @@ async def admin_ref_callback(update, context, data):
                 await query.edit_message_text("Подтвердите удаление в профиле пользователя.", reply_markup=back)
                 return
             try:
-                result = service.delete_client(email)
+                result = service.delete_client_bundle(email)
             except EXPECTED_SERVICE_ERRORS as exc:
                 LOGGER.warning("VPN client deletion failed: %s", type(exc).__name__, exc_info=True)
                 await query.edit_message_text("Не удалось удалить VPN-клиента. Можно повторить из профиля.",
@@ -897,8 +989,6 @@ async def admin_ref_callback(update, context, data):
         if pending["warnings"]:
             text += "\n⚠️ Очистка файлов подключения не завершена; требуется проверка на сервере."
         await query.edit_message_text(text, reply_markup=back)
-    if action == "u":
-        context.user_data.pop("delete_confirmation", None)
 
 
 async def create_bind_link(
@@ -946,6 +1036,201 @@ async def create_bind_link(
         reply_markup=keyboard,
         parse_mode=ParseMode.MARKDOWN_V2,
     )
+
+
+CREATE_TIMEOUT_SECONDS = 600
+
+
+def _create_state_valid(update, state):
+    chat_id = getattr(update.effective_chat, "id", None)
+    user_id = getattr(update.effective_user, "id", None)
+    return bool(state and state.get("chat_id") == chat_id and state.get("user_id") == user_id
+                and time.time() - state.get("updated_at", 0) <= CREATE_TIMEOUT_SECONDS)
+
+
+def _choice_keyboard(prefix, values):
+    rows = [[InlineKeyboardButton(label, callback_data=f"{prefix}:{value}")]
+            for label, value in values]
+    rows.append([InlineKeyboardButton("❌ Отмена", callback_data="ac:cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def admin_create_callback(update, context, data):
+    if not is_private_chat(update) or not is_admin(update):
+        return
+    query = update.callback_query
+    state = context.user_data.get("admin_create")
+    if data == "admin_create_help":
+        context.user_data["admin_create"] = {
+            "step": "username", "chat_id": getattr(update.effective_chat, "id", None),
+            "user_id": getattr(update.effective_user, "id", None), "updated_at": time.time(),
+        }
+        await query.edit_message_text(
+            "Введите имя пользователя (2–56 символов):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data="ac:cancel")]]),
+        )
+        return
+    if data == "ac:cancel":
+        context.user_data.pop("admin_create", None)
+        await render_admin_home(update)
+        return
+    if not _create_state_valid(update, state):
+        context.user_data.pop("admin_create", None)
+        await query.edit_message_text("Сессия создания устарела. Начните заново.")
+        return
+    state["updated_at"] = time.time()
+    if data.startswith("ac:t:") and state.get("step") == "term":
+        raw = data.removeprefix("ac:t:")
+        if raw not in {"30", "90", "180", "365", "unlimited"}:
+            return
+        state["days"] = None if raw == "unlimited" else int(raw)
+        state["step"] = "hwid"
+        await query.edit_message_text(
+            "Выберите лимит HWID:",
+            reply_markup=_choice_keyboard("ac:h", [(str(v), str(v)) for v in (1, 2, 3, 5)] + [("Безлимит", "0")]),
+        )
+        return
+    if data.startswith("ac:h:") and state.get("step") == "hwid":
+        raw = data.removeprefix("ac:h:")
+        if raw not in {"0", "1", "2", "3", "5"}:
+            return
+        state["hwid"] = int(raw)
+        state["step"] = "confirm"
+        term = "безлимит" if state["days"] is None else f"{state['days']} дней"
+        hwid = state["hwid"] or "безлимит"
+        await query.edit_message_text(
+            f"Создать пользователя?\n\nИмя: {state['email']}\nСрок: {term}\nHWID: {hwid}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Создать", callback_data="ac:ok")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="ac:cancel")],
+            ]),
+        )
+        return
+    if data == "ac:ok" and state.get("step") == "confirm":
+        # Consume before the mutation so repeated callbacks cannot create twice.
+        context.user_data.pop("admin_create", None)
+        try:
+            result = build_client_service().create_client_bundle(
+                state["email"], days=state["days"], hwid_limit=state["hwid"],
+            )
+        except ReconciliationRequiredError:
+            LOGGER.warning("Bundle creation requires reconciliation", exc_info=True)
+            await query.edit_message_text("⚠️ Требуется проверка состояния клиента")
+            return
+        except EXPECTED_SERVICE_ERRORS as exc:
+            await query.edit_message_text(safe_user_error(exc, admin=True))
+            return
+        ref_id = get_or_create_client_ref(state["email"])
+        term = "безлимит" if state["days"] is None else f"{state['days']} дней"
+        hwid = state["hwid"] or "безлимит"
+        text = ("✅ Пользователь создан\n\n"
+                f"Имя: {state['email']}\nСрок: {term}\nHWID: {hwid}\n"
+                "Primary status: активен\nMobile status: активен\nMobile quota: 50 ГБ")
+        rows = []
+        if result.subscription_page:
+            rows.append([InlineKeyboardButton("📱 Открыть подключение", url=result.subscription_page)])
+        rows.extend([
+            [InlineKeyboardButton("🔗 Привязать Telegram", callback_data=f"ub:{ref_id}")],
+            [InlineKeyboardButton("👤 Профиль", callback_data=f"u:{ref_id}")],
+            [InlineKeyboardButton("🏠 Главная", callback_data="admin_home")],
+        ])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def admin_create_text(update, context):
+    state = context.user_data.get("admin_create")
+    if not is_private_chat(update) or not is_admin(update) or not _create_state_valid(update, state):
+        context.user_data.pop("admin_create", None)
+        return
+    if state.get("step") != "username":
+        return
+    email = (update.message.text or "").strip()
+    try:
+        service = build_client_service()
+        service.validate_email(email)
+        if is_mobile_email(email):
+            raise ValidationError("служебный суффикс запрещён")
+        if len(email) > 56:
+            raise ValidationError("имя слишком длинное для bundle")
+        if service.get_client(email) is not None:
+            raise ValidationError("пользователь уже существует")
+    except ValidationError as exc:
+        await update.message.reply_text(f"Ошибка: {exc}. Введите другое имя или отмените операцию.")
+        return
+    except EXPECTED_SERVICE_ERRORS as exc:
+        await update.message.reply_text(safe_user_error(exc, admin=True))
+        return
+    state.update(email=email, step="term", updated_at=time.time())
+    await update.message.reply_text(
+        "Выберите срок подписки:",
+        reply_markup=_choice_keyboard("ac:t", [(f"{v} дней", str(v)) for v in (30, 90, 180, 365)] + [("Безлимит", "unlimited")]),
+    )
+
+
+async def admin_bundle_action_callback(update, context, data):
+    if not is_private_chat(update) or not is_admin(update):
+        return
+    query = update.callback_query
+    match = re.fullmatch(r"(ue|uh|ut|uda|um|umy|ue(?:30|90|180|365)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):([1-9][0-9]{0,18})", data)
+    if not match:
+        return
+    action, ref_id = match[1], int(match[2])
+    email = get_client_email_by_ref(ref_id)
+    if email is None:
+        await query.edit_message_text("Пользователь больше не существует")
+        return
+    back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Профиль", callback_data=f"u:{ref_id}")]])
+    try:
+        service = build_client_service()
+        if action == "ue":
+            await query.edit_message_text("На сколько продлить?", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{days} дней", callback_data=f"ue{days}:{ref_id}")]
+                for days in (30, 90, 180, 365)
+            ] + [[InlineKeyboardButton("❌ Отмена", callback_data=f"u:{ref_id}")]]))
+        elif action.startswith("ue"):
+            client = service.extend_client(email, int(action[2:]))
+            await query.edit_message_text(f"✅ Новый срок: {client.expiry_text}", reply_markup=back)
+        elif action == "uh":
+            await query.edit_message_text("Выберите HWID:", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(str(value) if value else "Безлимит", callback_data=f"uh{value}:{ref_id}")]
+                for value in (1, 2, 3, 5, 0)
+            ] + [[InlineKeyboardButton("❌ Отмена", callback_data=f"u:{ref_id}")]]))
+        elif action.startswith("uh"):
+            service.set_hwid_limit(email, int(action[2:]))
+            await query.edit_message_text("✅ HWID обновлён для всего bundle", reply_markup=back)
+        elif action == "ut":
+            client = service.get_client(email)
+            if client.enabled:
+                service.disable_client(email)
+                text = "⛔ Bundle отключён"
+            else:
+                service.enable_client(email)
+                text = "✅ Bundle включён"
+            await query.edit_message_text(text, reply_markup=back)
+        elif action == "uda":
+            service.reset_bundle_devices(email)
+            await query.edit_message_text("✅ Устройства сброшены", reply_markup=back)
+        elif action.startswith("ur"):
+            service.remove_bundle_device(email, int(action[2:]))
+            await query.edit_message_text("✅ Устройство удалено", reply_markup=back)
+        elif action == "um":
+            plan = service.plan_mobile_migration(email)
+            rows = [[InlineKeyboardButton("⬅ Профиль", callback_data=f"u:{ref_id}")]]
+            if not plan.already_migrated and not plan.blocking_errors:
+                context.user_data["migration_confirmation"] = ref_id
+                rows.insert(0, [InlineKeyboardButton("✅ Выполнить миграцию", callback_data=f"umy:{ref_id}")])
+            await query.edit_message_text(format_migration_plan(plan), reply_markup=InlineKeyboardMarkup(rows))
+        elif action == "umy":
+            if context.user_data.pop("migration_confirmation", None) != ref_id:
+                await query.edit_message_text("Сначала откройте план миграции.", reply_markup=back)
+                return
+            service.migrate_client_to_mobile_bundle(email)
+            await query.edit_message_text("✅ Мобильный доступ активирован", reply_markup=back)
+    except ReconciliationRequiredError:
+        LOGGER.warning("Bundle mutation requires reconciliation", exc_info=True)
+        await query.edit_message_text("⚠️ Требуется проверка состояния клиента", reply_markup=back)
+    except EXPECTED_SERVICE_ERRORS as exc:
+        await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
 
 
 # ============================================================
@@ -1047,6 +1332,14 @@ async def callbacks(
     data = query.data
     if not isinstance(data, str):
         return
+    if data == "admin_create_help" or data.startswith("ac:"):
+        if is_admin(update):
+            await admin_create_callback(update, context, data)
+        return
+    if re.fullmatch(r"(?:ue|uh|ut|uda|um|umy|ue(?:30|90|180|365)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):.*", data):
+        if is_admin(update):
+            await admin_bundle_action_callback(update, context, data)
+        return
     if re.fullmatch(r"(?:u|ub|ud|uc|udel|uy):.*", data):
         if is_admin(update):
             await admin_ref_callback(update, context, data)
@@ -1112,6 +1405,24 @@ async def callbacks(
             )
             return
 
+        if data == "admin_service":
+            try:
+                service = build_client_service()
+                connect_ok = service.connect_dir.is_dir() and service.connect_dir.exists()
+                output = (
+                    "🔧 Сервис\n\nBot: running logically\nXUI API: reachable\n"
+                    "Subscription issuer: ready\n"
+                    f"Connect directory: {'accessible' if connect_ok else 'unavailable'}\n"
+                    "Billing: configured / provider absent\nNotifier: configured"
+                )
+            except EXPECTED_SERVICE_ERRORS as exc:
+                output = safe_user_error(exc, admin=True)
+            await query.edit_message_text(
+                output,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главная", callback_data="admin_home")]]),
+            )
+            return
+
     # CLIENT
     user = update.effective_user
 
@@ -1163,6 +1474,7 @@ async def callbacks(
             LOGGER.warning("Unable to load billing plans", exc_info=True)
             await query.answer("Не удалось загрузить тарифы", show_alert=True)
             return
+
         await query.edit_message_text(
             "💳 *Продлить Карина VPN*\n\nВыберите тариф:",
             reply_markup=billing_plans_keyboard(plans), parse_mode=ParseMode.MARKDOWN_V2,
@@ -1257,6 +1569,10 @@ def main():
             "start",
             start,
         )
+    )
+
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_text)
     )
 
     app.add_handler(
