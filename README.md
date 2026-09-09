@@ -26,7 +26,7 @@ python -m compileall src
 Tests must not call production XUI, Happ or Telegram.
 
 The harness imports the configuration, XUI integration, client service and CLI
-safely. A few focused parser and CLI contract tests still compile selected
+safely. A few focused notifier and CLI contract tests still compile selected
 functions through AST. Tests block socket connections, subprocesses and SQLite
 connections. Lifecycle tests alone use a connection factory restricted to a
 synthetic database in pytest's `tmp_path`.
@@ -48,8 +48,16 @@ Focused fixes:
   injection. XUI login remains in the lazy CLI application factory.
 - `karina_user.py` is now a CLI adapter over `ClientService`; command names and
   stdout formats consumed by the bot and notifier remain stable.
+- `application.py` builds an authenticated `ClientService` lazily for both CLI
+  and Telegram actions. Telegram uses typed results directly and no longer
+  starts `karina-user` or parses its Russian stdout. The notifier continues to
+  consume the unchanged CLI text contract.
+- `integrations/happ/subscription.py` exposes the existing Happ, Crypt5, QR and
+  connection-page issuance flow as an injectable Python function;
+  `karina_issue.py` remains its command-line adapter.
 - CLI list columns now have explicit two-space separators, including for
-  names of 18, 32 and 64 characters. The bot parser needs no regex changes.
+  names of 18, 32 and 64 characters. This remains the notifier-facing CLI
+  contract; Telegram no longer parses the table.
 - `client_refs` maps persistent integer IDs to client names. Startup creates
   the table if missing, preserving existing data. Admin callbacks contain only
   an action and ref ID; old email-based buttons require reopening the list.
@@ -72,6 +80,4 @@ Known limitations:
   restart or lost backend response in this interval requires reconciliation;
   deletion progress is not persisted. Direct CLI deletion still has no access
   to Telegram DB and must not be used as a substitute for the admin flow.
-- `extract_info` recognizes only its hardcoded production URL prefix; the
-  anonymized `example.test` fixture intentionally yields no `url` field.
 - Other security and billing findings from the audit remain unresolved.

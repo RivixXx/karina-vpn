@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 
 import json
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 try:
-    from .app_config import ConfigError, load_config
+    from .application import build_client_service
+    from .app_config import ConfigError
     from .integrations.xui import XUIClient, XUIError
-    from .services import ClientService, ClientServiceError, SubscriptionIssueError
+    from .services import ClientService, ClientServiceError
 except ImportError:  # Direct execution from the src directory.
-    from app_config import ConfigError, load_config
+    from application import build_client_service
+    from app_config import ConfigError
     from integrations.xui import XUIClient, XUIError
-    from services import ClientService, ClientServiceError, SubscriptionIssueError
+    from services import ClientService, ClientServiceError
 
 CONFIG = Path("/etc/karina-vpn/config.env")
 CONNECT_DIR = Path("/var/www/karina/connect")
@@ -57,27 +58,9 @@ def status_text(status):
     return {"active": "🟢 Активен", "expired": "🟠 Истёк", "disabled": "🔴 Отключён"}[status]
 
 
-def issue_subscription(sub_id, config):
-    url = f"{config.sub_base}/{sub_id}"
-    try:
-        proc = subprocess.run(
-            ["/usr/local/bin/karina-issue", url], capture_output=True, text=True,
-        )
-    except Exception as exc:
-        raise SubscriptionIssueError(str(exc)) from exc
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "неизвестная ошибка").strip()[:500]
-        raise SubscriptionIssueError(detail)
-    return f"{config.connect_base}/{sub_id}.html"
-
-
 def build_service(config_path=CONFIG):
-    config = load_config(config_path)
-    xui = XUIClient(config)
-    xui.login()
-    return ClientService(
-        config, xui,
-        issue_subscription=lambda sub_id: issue_subscription(sub_id, config),
+    return build_client_service(
+        config_path,
         connect_dir=CONNECT_DIR,
     )
 

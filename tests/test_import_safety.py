@@ -1,5 +1,6 @@
 import importlib
 import sys
+from types import ModuleType, SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,44 @@ def test_client_service_import_has_no_production_access(monkeypatch):
     module = importlib.import_module("src.services.client_service")
     importlib.reload(module)
     assert module.ClientService.__name__ == "ClientService"
+
+
+def test_application_import_has_no_production_access(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Application import attempted production access")
+
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.build_opener", blocked)
+    module = importlib.import_module("src.application")
+    importlib.reload(module)
+    assert callable(module.build_client_service)
+
+
+def test_bot_import_has_no_production_access(monkeypatch):
+    def blocked(*args, **kwargs):
+        raise AssertionError("Bot import attempted production access")
+
+    telegram = ModuleType("telegram")
+    telegram.InlineKeyboardButton = type("InlineKeyboardButton", (), {})
+    telegram.InlineKeyboardMarkup = type("InlineKeyboardMarkup", (), {})
+    telegram.Update = type("Update", (), {"ALL_TYPES": ()})
+    constants = ModuleType("telegram.constants")
+    constants.ChatType = SimpleNamespace(PRIVATE="private")
+    constants.ParseMode = SimpleNamespace(MARKDOWN_V2="MarkdownV2")
+    extension = ModuleType("telegram.ext")
+    extension.Application = type("Application", (), {})
+    extension.CallbackQueryHandler = type("CallbackQueryHandler", (), {})
+    extension.CommandHandler = type("CommandHandler", (), {})
+    extension.ContextTypes = SimpleNamespace(DEFAULT_TYPE=object)
+    monkeypatch.setitem(sys.modules, "telegram", telegram)
+    monkeypatch.setitem(sys.modules, "telegram.constants", constants)
+    monkeypatch.setitem(sys.modules, "telegram.ext", extension)
+    monkeypatch.setattr("pathlib.Path.read_text", blocked)
+    monkeypatch.setattr("urllib.request.build_opener", blocked)
+    monkeypatch.setattr("sqlite3.connect", blocked)
+    sys.modules.pop("src.bot", None)
+    module = importlib.import_module("src.bot")
+    assert module.BOT_TOKEN is None and module.ADMIN_TG_ID is None
 
 
 def test_cli_formats_expected_xui_errors(monkeypatch, capsys):

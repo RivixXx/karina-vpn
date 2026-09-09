@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SQLITE_CONNECT = sqlite3.connect
 ALLOWED = {
-    "bot.py": {"extract_info", "parse_user_names", "esc"},
+    "bot.py": {"esc"},
     "notifier.py": {"parse_expiring", "notification_stage"},
 }
 

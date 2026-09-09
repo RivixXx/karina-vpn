@@ -38,7 +38,7 @@ def test_expiring_cli_suffix(fixture_text):
 
 
 @pytest.mark.parametrize("length", [2, 4, 17, 18, 32, 64])
-def test_real_list_formatter_round_trips_to_bot(length, source_functions, pure_functions, capsys):
+def test_real_list_formatter_has_stable_columns(length, source_functions, capsys):
     name = "n" * length
     client = SimpleNamespace(
         email=name, status="active", device_count=1, device_limit=2,
@@ -58,4 +58,3 @@ def test_real_list_formatter_round_trips_to_bot(length, source_functions, pure_f
     assert re.split(r"\s{2,}", row.strip()) == [
         name, "🟢 Активен", "1/2", "500 МБ", "∞", "01.10.2030",
     ]
-    assert pure_functions("bot.py")["parse_user_names"](output) == [name]

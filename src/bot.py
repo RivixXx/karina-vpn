@@ -1,8 +1,7 @@
 import re
-import json
+import logging
 import secrets
 import sqlite3
-import subprocess
 import time
 from contextlib import closing
 from pathlib import Path
@@ -20,10 +19,25 @@ from telegram.ext import (
     ContextTypes,
 )
 
+try:
+    from .app_config import ConfigError
+    from .application import build_client_service
+    from .integrations.xui import XUIError
+    from .models import ClientInfo, DeviceInfo, TrafficInfo
+    from .services import ClientServiceError
+except ImportError:  # Direct execution from the src directory.
+    from app_config import ConfigError
+    from application import build_client_service
+    from integrations.xui import XUIError
+    from models import ClientInfo, DeviceInfo, TrafficInfo
+    from services import ClientServiceError
+
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
 
 SUPPORT_URL = "https://t.me/rivixxx"
+LOGGER = logging.getLogger(__name__)
+EXPECTED_SERVICE_ERRORS = (ConfigError, XUIError, ClientServiceError)
 
 
 # ============================================================
@@ -45,10 +59,8 @@ def load_env(path):
     return data
 
 
-ENV = load_env(ENV_FILE)
-
-BOT_TOKEN = ENV["BOT_TOKEN"]
-ADMIN_TG_ID = int(ENV["ADMIN_TG_ID"])
+BOT_TOKEN = None
+ADMIN_TG_ID = None
 
 
 # ============================================================
@@ -266,71 +278,102 @@ def consume_bind_token(token, user):
 
 
 # ============================================================
-# KARINA USER BACKEND
+# CLIENT PRESENTATION
 # ============================================================
 
-def run_karina(args):
-    try:
-        result = subprocess.run(
-            [
-                "/usr/local/bin/karina-user",
-                *args,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=90,
-        )
-
-        stdout = result.stdout or ""
-        stderr = result.stderr or ""
-
-        output = stdout
-
-        if stdout and stderr:
-            output += "\n"
-
-        output += stderr
-
-        return result.returncode, output.strip()
-
-    except subprocess.TimeoutExpired:
-        return 1, "Превышено время ожидания."
-
-    except Exception as exc:
-        return 1, f"Ошибка backend: {exc}"
+def bytes_to_human(value):
+    if not value:
+        return "0 Б"
+    value = float(value)
+    for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
+        if value < 1024 or unit == "ТБ":
+            return f"{int(value)} {unit}" if unit == "Б" else f"{value:.1f} {unit}"
+        value /= 1024
 
 
-def extract_info(raw):
-    data = {}
+def traffic_limit_text(value):
+    return "∞" if not value else f"{value / 1024 ** 3:.1f} ГБ"
 
-    for raw_line in raw.splitlines():
-        line = raw_line.strip()
 
-        if not line:
-            continue
+def status_text(status):
+    return {"active": "Активен", "expired": "Истёк", "disabled": "Отключён"}.get(
+        status, "Неизвестно"
+    )
 
-        mapping = {
-            "Пользователь:": "email",
-            "Статус:": "status",
-            "Истекает:": "expiry",
-            "Срок:": "expiry",
-            "Устройства:": "devices",
-            "Использовано:": "used",
-            "Лимит:": "limit",
-            "Трафик:": "limit",
-            "Серверы:": "servers",
-        }
 
-        for prefix, key in mapping.items():
-            if line.startswith(prefix):
-                data[key] = line[len(prefix):].strip()
+def format_client_profile(client: ClientInfo) -> str:
+    limit = client.device_limit or "∞"
+    status = status_text(client.status)
+    icon = {"active": "🟢", "expired": "🟠"}.get(client.status, "🔴")
+    return (
+        "💗 *Карина VPN*\n\n"
+        "👑 *Мой профиль*\n\n"
+        f"├ 📅 Подписка: *до {esc(client.expiry_text)}*\n"
+        f"├ 📱 Устройства: *{esc(f'{client.device_count} / {limit}')}*\n"
+        f"├ 📊 Использовано: *{esc(bytes_to_human(client.used_traffic_bytes))}*\n"
+        f"├ 🎚 Лимит: *{esc(traffic_limit_text(client.total_traffic_bytes))}*\n"
+        f"└ 🛡 VPN: {icon} *{esc(status)}*\n\n"
+        "✨ _Свобода быть онлайн_"
+    )
 
-        if line.startswith(
-            "https://vpn.parsekk.ru/connect/"
-        ):
-            data["url"] = line
 
-    return data
+def format_devices(devices: list[DeviceInfo], limit: int) -> str:
+    lines = [f"Использовано: {len(devices)} / {limit or '∞'}", ""]
+    if not devices:
+        return "\n".join(lines + ["Зарегистрированных устройств нет."])
+    for device in devices:
+        os_text = device.os_name or "Неизвестная ОС"
+        if device.os_version:
+            os_text += " " + device.os_version
+        lines.extend([
+            f"ID:         {device.id}",
+            f"Устройство: {device.model or 'Неизвестное устройство'}",
+            f"ОС:         {os_text}",
+            f"Клиент:     {device.user_agent}",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
+def format_traffic(traffic: TrafficInfo) -> str:
+    lines = [f"Использовано: {bytes_to_human(traffic.used_bytes)}"]
+    if traffic.limit_bytes:
+        lines.extend([
+            f"Лимит:        {bytes_to_human(traffic.limit_bytes)}",
+            f"Осталось:     {bytes_to_human(traffic.remaining_bytes)}",
+            f"Использовано: {traffic.percent_used:.1f}%",
+        ])
+    else:
+        lines.append("Лимит:        Безлимит")
+    return "\n".join(lines)
+
+
+def safe_user_error(exc, admin=False):
+    LOGGER.warning("Client operation failed: %s", type(exc).__name__, exc_info=True)
+    if admin:
+        return f"Не удалось выполнить операцию ({type(exc).__name__}). Попробуйте ещё раз."
+    return "Не удалось выполнить операцию. Попробуйте позже или обратитесь в поддержку."
+
+
+def format_admin_stats(clients) -> str:
+    counts = {"active": 0, "expired": 0, "disabled": 0}
+    for client in clients:
+        counts[client.status] = counts.get(client.status, 0) + 1
+    return (
+        f"Всего:      {len(clients)}\n"
+        f"Активных:   {counts['active']}\n"
+        f"Истекло:    {counts['expired']}\n"
+        f"Отключено:  {counts['disabled']}"
+    )
+
+
+def format_expiring(clients) -> str:
+    if not clients:
+        return "Таких подписок нет."
+    return "\n".join(
+        f"{client.email:<20} осталось {client.days_remaining:.1f} дн."
+        for client in clients
+    )
 
 
 def esc(value):
@@ -422,114 +465,45 @@ def client_keyboard(email, url=None):
 
 
 async def render_client_home(update, email):
-    code, output = run_karina(
-        [
-            "info",
-            email,
-        ]
-    )
-
-    if code != 0:
-        text = (
-            "❌ Не удалось получить данные подписки\\.\n\n"
-            f"{esc(output)}"
-        )
-
+    try:
+        client = build_client_service().get_client(email)
+    except EXPECTED_SERVICE_ERRORS as exc:
+        text = f"❌ {esc(safe_user_error(exc))}"
         keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "💬 Поддержка",
-                        url=SUPPORT_URL,
-                    )
-                ]
-            ]
+            [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
         )
-
     else:
-        data = extract_info(output)
-
-        status = data.get(
-            "status",
-            "Неизвестно",
-        )
-
-        expiry = data.get(
-            "expiry",
-            "—",
-        )
-
-        devices = data.get(
-            "devices",
-            "—",
-        )
-
-        used = data.get(
-            "used",
-            "—",
-        )
-
-        limit = data.get(
-            "limit",
-            "—",
-        )
-
-        url = data.get("url")
-
-        if "Активен" in status:
-            vpn_icon = "🟢"
-        elif "Истёк" in status:
-            vpn_icon = "🟠"
+        if client is None:
+            text = "❌ Подписка не найдена\\. Обратитесь в поддержку\\."
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
+            )
         else:
-            vpn_icon = "🔴"
-
-        text = (
-            "💗 *Карина VPN*\n\n"
-            "👑 *Мой профиль*\n\n"
-            f"├ 📅 Подписка: *до {esc(expiry)}*\n"
-            f"├ 📱 Устройства: *{esc(devices)}*\n"
-            f"├ 📊 Использовано: *{esc(used)}*\n"
-            f"├ 🎚 Лимит: *{esc(limit)}*\n"
-            f"└ 🛡 VPN: {vpn_icon} *{esc(status)}*\n\n"
-            "✨ _Свобода быть онлайн_"
-        )
-
-        keyboard = client_keyboard(
-            email,
-            url,
-        )
+            text = format_client_profile(client)
+            keyboard = client_keyboard(email, client.connect_url)
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN_V2,
+            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2,
         )
-
     else:
         await update.message.reply_text(
-            text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN_V2,
+            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2,
         )
 
 
 async def client_devices(update, email):
-    code, output = run_karina(
-        [
-            "devices",
-            email,
-        ]
-    )
-
-    if code != 0:
-        text = f"❌ {esc(output)}"
-
-    else:
-        text = (
-            "📱 *Мои устройства*\n\n"
-            f"```text\n{output}\n```"
-        )
+    try:
+        service = build_client_service()
+        client = service.get_client(email)
+        if client is None:
+            text = "❌ Подписка не найдена\\."
+        else:
+            text = "📱 *Мои устройства*\n\n```text\n" + format_devices(
+                service.get_devices(email), client.device_limit
+            ) + "\n```"
+    except EXPECTED_SERVICE_ERRORS as exc:
+        text = f"❌ {esc(safe_user_error(exc))}"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -556,21 +530,11 @@ async def client_devices(update, email):
 
 
 async def client_traffic(update, email):
-    code, output = run_karina(
-        [
-            "traffic",
-            email,
-        ]
-    )
-
-    if code != 0:
-        text = f"❌ {esc(output)}"
-
-    else:
-        text = (
-            "📊 *Использование VPN*\n\n"
-            f"```text\n{output}\n```"
-        )
+    try:
+        output = format_traffic(build_client_service().get_traffic(email))
+        text = "📊 *Использование VPN*\n\n" f"```text\n{output}\n```"
+    except EXPECTED_SERVICE_ERRORS as exc:
+        text = f"❌ {esc(safe_user_error(exc))}"
 
     keyboard = InlineKeyboardMarkup(
         [
@@ -591,15 +555,12 @@ async def client_traffic(update, email):
 
 
 async def client_key(update, email):
-    code, output = run_karina(
-        [
-            "info",
-            email,
-        ]
-    )
-
-    data = extract_info(output)
-    url = data.get("url")
+    try:
+        client = build_client_service().get_client(email)
+        url = client.connect_url if client else None
+    except EXPECTED_SERVICE_ERRORS as exc:
+        LOGGER.warning("Unable to load client key: %s", type(exc).__name__, exc_info=True)
+        url = None
 
     buttons = []
 
@@ -689,48 +650,25 @@ async def render_admin_home(update):
         )
 
 
-def parse_user_names(raw):
-    names = []
-
-    for line in raw.splitlines():
-        match = re.match(
-            r"^([A-Za-z0-9_.-]+)\s+"
-            r"(?:🟢|🟠|🔴)",
-            line.strip(),
-        )
-
-        if match:
-            names.append(
-                match.group(1)
-            )
-
-    return names
-
-
 async def admin_users(update):
-    code, output = run_karina(
-        ["list"]
-    )
-
-    if code != 0:
+    try:
+        clients = build_client_service().list_clients()
+    except EXPECTED_SERVICE_ERRORS as exc:
         await update.callback_query.edit_message_text(
-            f"❌ {esc(output)}"
+            f"❌ {esc(safe_user_error(exc, admin=True))}"
         )
         return
-
-    names = parse_user_names(output)
-
     rows = []
-
-    for email in names:
+    for client in clients:
+        email = client.email
         linked = get_link_by_email(email)
-
-        icon = "🔗" if linked else "⚪"
-
+        link_icon = "🔗" if linked else "⚪"
+        status_icon = {"active": "🟢", "expired": "🟠"}.get(client.status, "🔴")
+        device_limit = client.device_limit or "∞"
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"{icon} {email}",
+                    f"{link_icon} {status_icon} {email} · {client.device_count}/{device_limit} · {client.expiry_text}",
                     callback_data=client_callback("u", email),
                 )
             ]
@@ -757,20 +695,16 @@ async def admin_users(update):
 
 
 async def admin_user(update, email):
-    code, output = run_karina(
-        [
-            "info",
-            email,
-        ]
-    )
-
-    if code != 0:
+    try:
+        client = build_client_service().get_client(email)
+    except EXPECTED_SERVICE_ERRORS as exc:
         await update.callback_query.edit_message_text(
-            f"❌ {esc(output)}"
+            f"❌ {esc(safe_user_error(exc, admin=True))}"
         )
         return
-
-    data = extract_info(output)
+    if client is None:
+        await update.callback_query.edit_message_text("Пользователь больше не существует")
+        return
 
     linked = get_link_by_email(email)
 
@@ -794,9 +728,9 @@ async def admin_user(update, email):
     text = (
         "👑 *Пользователь*\n\n"
         f"👤 *{esc(email)}*\n"
-        f"📅 {esc(data.get('expiry', '—'))}\n"
-        f"📱 {esc(data.get('devices', '—'))}\n"
-        f"🛡 {esc(data.get('status', '—'))}\n\n"
+        f"📅 {esc(client.expiry_text)}\n"
+        f"📱 {esc(str(client.device_count) + ' / ' + str(client.device_limit or '∞'))}\n"
+        f"🛡 {esc(status_text(client.status))}\n\n"
         f"{telegram_text}"
     )
 
@@ -848,15 +782,20 @@ async def admin_ref_callback(update, context, data):
         await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
         return
     action, ref_id = match[1], int(match[2])
-    # Keep a successful backend result for retry if SQLite cleanup fails.
+    # Keep a successful service result for retry if SQLite cleanup fails.
     pending = context.user_data.get("deleted_vpn")
     retry_cleanup = action == "uy" and pending and pending["ref"] == ref_id
+    service = None
+    client = None
     if not retry_cleanup:
-        code, output = run_karina(["info", email])
-        if code != 0:
-            text = ("Пользователь больше не существует" if f"клиент {email} не найден" in output
-                    else "Не удалось проверить пользователя. Попробуйте ещё раз.")
-            await query.edit_message_text(text, reply_markup=back)
+        try:
+            service = build_client_service()
+            client = service.get_client(email)
+        except EXPECTED_SERVICE_ERRORS as exc:
+            await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
+            return
+        if client is None:
+            await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
             return
     if action == "u":
         await admin_user(update, email)
@@ -865,10 +804,12 @@ async def admin_ref_callback(update, context, data):
     elif action in {"ud", "uc"}:
         rows = [[InlineKeyboardButton("⬅️ Профиль", callback_data=f"u:{ref_id}")]]
         if action == "ud":
-            code, output = run_karina(["devices", email])
-            text = output if code == 0 else "Не удалось получить устройства. Попробуйте ещё раз."
+            try:
+                text = format_devices(service.get_devices(email), client.device_limit)
+            except EXPECTED_SERVICE_ERRORS as exc:
+                text = safe_user_error(exc, admin=True)
         else:
-            url = extract_info(output).get("url")
+            url = client.connect_url
             if url:
                 rows.insert(0, [InlineKeyboardButton("💗 Подключить Карина VPN", url=url)])
             text = "🔗 Подключение"
@@ -890,20 +831,17 @@ async def admin_ref_callback(update, context, data):
             if context.user_data.get("delete_confirmation") != ref_id:
                 await query.edit_message_text("Подтвердите удаление в профиле пользователя.", reply_markup=back)
                 return
-            code, output = run_karina(["delete-confirmed", email])
-            if code != 0:
+            try:
+                result = service.delete_client(email)
+            except EXPECTED_SERVICE_ERRORS as exc:
+                LOGGER.warning("VPN client deletion failed: %s", type(exc).__name__, exc_info=True)
                 await query.edit_message_text("Не удалось удалить VPN-клиента. Можно повторить из профиля.",
                                               reply_markup=InlineKeyboardMarkup([
                                                   [InlineKeyboardButton("⬅️ Профиль", callback_data=f"u:{ref_id}")]]))
                 return
-            try:
-                result = json.loads(output)
-                if result.get("vpn_deleted") is not True or not isinstance(result.get("warnings"), list):
-                    raise ValueError("Unexpected backend response")
-            except (ValueError, AttributeError):
-                await query.edit_message_text("Backend вернул неизвестный результат. Требуется проверка удаления.", reply_markup=back)
-                return
-            pending = {"ref": ref_id, "warnings": result["warnings"]}
+            pending = {"ref": ref_id, "warnings": (
+                [result.file_cleanup_warning] if result.file_cleanup_warning else []
+            )}
             context.user_data["deleted_vpn"] = pending
         try:
             with closing(db_connect()) as db, db:
@@ -1090,9 +1028,10 @@ async def callbacks(
             return
 
         if data == "admin_stats":
-            code, output = run_karina(
-                ["list"]
-            )
+            try:
+                output = format_admin_stats(build_client_service().list_clients())
+            except EXPECTED_SERVICE_ERRORS as exc:
+                output = safe_user_error(exc, admin=True)
 
             await query.edit_message_text(
                 "📊 *Статистика*\n\n"
@@ -1112,12 +1051,10 @@ async def callbacks(
             return
 
         if data == "admin_expiring":
-            code, output = run_karina(
-                [
-                    "expiring",
-                    "7",
-                ]
-            )
+            try:
+                output = format_expiring(build_client_service().get_expiring(7))
+            except EXPECTED_SERVICE_ERRORS as exc:
+                output = safe_user_error(exc, admin=True)
 
             await query.edit_message_text(
                 "⏰ *Заканчиваются за 7 дней*\n\n"
@@ -1229,6 +1166,10 @@ async def callbacks(
 # ============================================================
 
 def main():
+    global BOT_TOKEN, ADMIN_TG_ID
+    env = load_env(ENV_FILE)
+    BOT_TOKEN = env["BOT_TOKEN"]
+    ADMIN_TG_ID = int(env["ADMIN_TG_ID"])
     init_db()
 
     app = (
