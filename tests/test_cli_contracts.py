@@ -42,7 +42,7 @@ def test_real_list_formatter_round_trips_to_bot(length, source_functions, pure_f
     name = "n" * length
     functions = source_functions(
         "karina_user.py", {"cmd_list"},
-        XUI=lambda: SimpleNamespace(login=lambda: None),
+        create_api=lambda: (SimpleNamespace(), SimpleNamespace()),
         collect_client_names=lambda api: [name],
         get_client_full=lambda api, email: {
             "obj": {"usedTraffic": 0},

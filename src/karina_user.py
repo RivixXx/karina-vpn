@@ -6,12 +6,15 @@ import secrets
 import string
 import subprocess
 import sys
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timedelta
-from http.cookiejar import CookieJar
 from pathlib import Path
+
+try:
+    from .app_config import ConfigError, KarinaConfig, load_config
+    from .integrations.xui import XUIClient, XUIError
+except ImportError:  # Direct execution from the src directory.
+    from app_config import ConfigError, KarinaConfig, load_config
+    from integrations.xui import XUIClient, XUIError
 
 CONFIG = Path("/etc/karina-vpn/config.env")
 CONNECT_DIR = Path("/var/www/karina/connect")
@@ -22,276 +25,11 @@ def die(message, code=1):
     sys.exit(code)
 
 
-def load_env(path):
-    if not path.exists():
-        die(f"не найден {path}")
-
-    env = {}
-
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        env[key.strip()] = value.strip().strip('"').strip("'")
-
-    required = [
-        "XUI_BASE",
-        "XUI_USER",
-        "XUI_PASS",
-        "SUB_BASE",
-        "CONNECT_BASE",
-        "INBOUND_IDS",
-    ]
-
-    for key in required:
-        if not env.get(key):
-            die(f"в {path} отсутствует {key}")
-
-    return env
-
-
-ENV = load_env(CONFIG)
-
-BASE = ENV["XUI_BASE"].rstrip("/")
-SUB_BASE = ENV["SUB_BASE"].rstrip("/")
-CONNECT_BASE = ENV["CONNECT_BASE"].rstrip("/")
-INBOUND_IDS = [
-    int(x.strip())
-    for x in ENV["INBOUND_IDS"].split(",")
-    if x.strip()
-]
-DEFAULT_HWID = int(ENV.get("DEFAULT_HWID_LIMIT", "2"))
-
-
-class XUI:
-    def __init__(self):
-        self.cookies = CookieJar()
-        self.opener = urllib.request.build_opener(
-            urllib.request.HTTPCookieProcessor(self.cookies)
-        )
-        self.csrf = None
-
-    def request(self, method, path, payload=None, csrf=False):
-        url = BASE + path
-
-        headers = {
-            "User-Agent": "KarinaVPN-Automation/1.1",
-            "Accept": "application/json",
-        }
-
-        body = None
-
-        if payload is not None:
-            body = json.dumps(
-                payload,
-                ensure_ascii=False,
-            ).encode("utf-8")
-            headers["Content-Type"] = "application/json"
-
-        if csrf and self.csrf:
-            headers["X-CSRF-Token"] = self.csrf
-
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers=headers,
-            method=method,
-        )
-
-        try:
-            with self.opener.open(req, timeout=20) as response:
-                raw = response.read().decode(
-                    "utf-8",
-                    errors="replace",
-                )
-        except urllib.error.HTTPError as exc:
-            raw = exc.read().decode(
-                "utf-8",
-                errors="replace",
-            )
-            die(f"HTTP {exc.code}: {raw or exc.reason}")
-        except Exception as exc:
-            die(f"ошибка обращения к 3x-ui: {exc}")
-
-        if not raw:
-            return {}
-
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            die(f"3x-ui вернул не JSON: {raw[:500]}")
-
-    def login(self):
-        csrf_result = self.request(
-            "GET",
-            "/csrf-token",
-        )
-
-        if not csrf_result.get("success"):
-            die(
-                f"не удалось получить CSRF: "
-                f"{csrf_result}"
-            )
-
-        self.csrf = csrf_result["obj"]
-
-        login_result = self.request(
-            "POST",
-            "/login",
-            {
-                "username": ENV["XUI_USER"],
-                "password": ENV["XUI_PASS"],
-                "twoFactorCode": "",
-            },
-            csrf=True,
-        )
-
-        if not login_result.get("success"):
-            die(
-                login_result.get(
-                    "msg",
-                    "не удалось войти в 3x-ui",
-                )
-            )
-
-    def get_client(self, email):
-        result = self.request(
-            "GET",
-            "/panel/api/clients/get/"
-            + urllib.parse.quote(email, safe=""),
-        )
-
-        if not result.get("success"):
-            return None
-
-        return result["obj"]
-
-    def list_inbounds(self):
-        result = self.request(
-            "GET",
-            "/panel/api/inbounds/list",
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось получить список inbound",
-                )
-            )
-
-        return result.get("obj", [])
-
-    def create_client(self, payload):
-        result = self.request(
-            "POST",
-            "/panel/api/clients/add",
-            payload,
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось создать клиента",
-                )
-            )
-
-        return result.get("obj")
-
-    def update_client(self, email, payload):
-        result = self.request(
-            "POST",
-            "/panel/api/clients/update/"
-            + urllib.parse.quote(email, safe=""),
-            payload,
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось обновить клиента",
-                )
-            )
-
-        return result.get("obj")
-
-    def delete_client(self, email):
-        result = self.request(
-            "POST",
-            "/panel/api/clients/del/"
-            + urllib.parse.quote(email, safe=""),
-            {},
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось удалить клиента",
-                )
-            )
-
-    def get_hwids(self, email):
-        result = self.request(
-            "POST",
-            "/panel/api/clients/hwids/"
-            + urllib.parse.quote(email, safe=""),
-            {},
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось получить список устройств",
-                )
-            )
-
-        return result.get("obj", [])
-
-    def delete_hwid(self, email, device_id):
-        result = self.request(
-            "DELETE",
-            "/panel/api/clients/hwids/"
-            + urllib.parse.quote(email, safe="")
-            + f"/{device_id}",
-            None,
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось удалить устройство",
-                )
-            )
-
-    def reset_hwids(self, email):
-        result = self.request(
-            "DELETE",
-            "/panel/api/clients/hwids/"
-            + urllib.parse.quote(email, safe=""),
-            None,
-            csrf=True,
-        )
-
-        if not result.get("success"):
-            die(
-                result.get(
-                    "msg",
-                    "не удалось сбросить устройства",
-                )
-            )
+def create_api(config=None):
+    config = config or load_config(CONFIG)
+    api = XUIClient(config)
+    api.login()
+    return config, api
 
 
 def normalize_email(value):
@@ -407,8 +145,8 @@ def get_status(client):
     return "🟢 Активен"
 
 
-def issue_page(sub_id):
-    url = f"{SUB_BASE}/{sub_id}"
+def issue_page(sub_id, config):
+    url = f"{config.sub_base}/{sub_id}"
 
     proc = subprocess.run(
         [
@@ -431,7 +169,7 @@ def issue_page(sub_id):
         )
         return None
 
-    return f"{CONNECT_BASE}/{sub_id}.html"
+    return f"{config.connect_base}/{sub_id}.html"
 
 
 def collect_client_names(api):
@@ -473,7 +211,7 @@ def get_client_full(api, email):
 
     try:
         devices = api.get_hwids(email)
-    except SystemExit:
+    except XUIError:
         devices = []
 
     return {
@@ -492,6 +230,7 @@ def cmd_create(args):
         )
 
     email = normalize_email(args[0])
+    config = load_config(CONFIG)
 
     try:
         days = (
@@ -503,7 +242,7 @@ def cmd_create(args):
         hwid = (
             int(args[2])
             if len(args) >= 3
-            else DEFAULT_HWID
+            else config.default_hwid_limit
         )
 
         traffic_gb = (
@@ -523,8 +262,7 @@ def cmd_create(args):
     if traffic_gb < 0:
         die("трафик не может быть отрицательным")
 
-    api = XUI()
-    api.login()
+    config, api = create_api(config)
 
     if api.get_client(email):
         die(f"клиент {email} уже существует")
@@ -551,7 +289,7 @@ def cmd_create(args):
             "trafficReset": "never",
             "trafficResetDay": 1,
         },
-        "inboundIds": INBOUND_IDS,
+        "inboundIds": list(config.inbound_ids),
     }
 
     api.create_client(payload)
@@ -562,9 +300,7 @@ def cmd_create(args):
         die("клиент не найден после создания")
 
     client = created["client"]
-    page = issue_page(
-        client["subId"]
-    )
+    page = issue_page(client["subId"], config)
 
     print()
     print("💗 Карина VPN")
@@ -605,8 +341,7 @@ def cmd_info(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     full = get_client_full(
         api,
@@ -657,7 +392,7 @@ def cmd_info(args):
     print()
     print("Страница подключения:")
     print(
-        f"{CONNECT_BASE}/"
+        f"{config.connect_base}/"
         f"{client['subId']}.html"
     )
 
@@ -669,8 +404,7 @@ def cmd_list(args):
             "karina-user list"
         )
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     names = collect_client_names(api)
 
@@ -782,8 +516,7 @@ def cmd_expiring(args):
     if days < 0:
         die("количество дней не может быть отрицательным")
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     names = collect_client_names(api)
 
@@ -866,8 +599,7 @@ def cmd_traffic(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -944,8 +676,7 @@ def cmd_set_traffic(args):
     if gb < 0:
         die("лимит трафика не может быть отрицательным")
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -995,8 +726,7 @@ def cmd_set_hwid(args):
     if hwid < 0:
         die("лимит HWID не может быть отрицательным")
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -1033,8 +763,7 @@ def cmd_devices(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -1127,8 +856,7 @@ def cmd_device_remove(args):
     except ValueError:
         die("ID устройства должен быть числом")
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     if not api.get_client(email):
         die(f"клиент {email} не найден")
@@ -1153,8 +881,7 @@ def cmd_devices_reset(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     if not api.get_client(email):
         die(f"клиент {email} не найден")
@@ -1192,8 +919,7 @@ def cmd_extend(args):
     if days <= 0:
         die("количество дней должно быть больше 0")
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -1243,8 +969,7 @@ def cmd_disable(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -1277,8 +1002,7 @@ def cmd_enable(args):
 
     email = normalize_email(args[0])
 
-    api = XUI()
-    api.login()
+    config, api = create_api()
 
     obj = api.get_client(email)
 
@@ -1303,8 +1027,7 @@ def cmd_enable(args):
 
 
 def delete_client_impl(email):
-    api = XUI()
-    api.login()
+    config, api = create_api()
     obj = api.get_client(email)
     if not obj:
         die(f"клиент {email} не найден")
@@ -1439,7 +1162,10 @@ def main():
         usage()
         sys.exit(1)
 
-    handler(args)
+    try:
+        handler(args)
+    except (ConfigError, XUIError) as exc:
+        die(str(exc))
 
 
 if __name__ == "__main__":

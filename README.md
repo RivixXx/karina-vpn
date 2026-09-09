@@ -38,6 +38,11 @@ with normal imports only once imports become safe in a future task.
 
 Focused fixes:
 
+- `app_config.py` loads and validates typed configuration only on explicit
+  request. Importing `src.karina_user` does not read production configuration.
+- `integrations/xui` owns the existing urllib cookie, CSRF and endpoint flow.
+  It raises typed errors without printing or exiting; the CLI converts expected
+  config and XUI failures to the existing `Ошибка: ...` output.
 - CLI list columns now have explicit two-space separators, including for
   names of 18, 32 and 64 characters. The bot parser needs no regex changes.
 - `client_refs` maps persistent integer IDs to client names. Startup creates

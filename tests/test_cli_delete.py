@@ -16,7 +16,8 @@ def cli(source_functions, tmp_path):
     def die(message):
         raise SystemExit(message)
     funcs = source_functions("karina_user.py", {"delete_client_impl", "cmd_delete", "cmd_delete_confirmed", "normalize_email"},
-                             XUI=lambda: api, CONNECT_DIR=directory, die=die, json=json, sys=sys)
+                             create_api=lambda: (NS(), api), CONNECT_DIR=directory,
+                             die=die, json=json, sys=sys)
     return funcs, api, directory
 
 
