@@ -1,4 +1,5 @@
 from src.models import ClientInfo, DeviceInfo, TrafficInfo
+from src.telegram_format import markdown_v2_escape
 
 
 def load_formatters(source_functions):
@@ -6,7 +7,8 @@ def load_formatters(source_functions):
         "markdown_v2_escape", "bytes_to_human", "traffic_limit_text", "status_text",
         "format_client_profile", "format_devices", "format_traffic", "safe_user_error",
     }
-    return source_functions("bot.py", names, LOGGER=type("Log", (), {"warning": lambda *a, **k: None})())
+    return source_functions("bot.py", names, _markdown_v2_escape=markdown_v2_escape,
+                            LOGGER=type("Log", (), {"warning": lambda *a, **k: None})())
 
 
 def test_profile_formatter_uses_typed_client(source_functions):

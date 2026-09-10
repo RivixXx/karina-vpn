@@ -27,6 +27,7 @@ try:
     from .integrations.xui import XUIError
     from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
     from .repositories import BillingRepository
+    from .telegram_format import markdown_v2_escape as _markdown_v2_escape
     from .services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
         ReconciliationRequiredError, ValidationError,
@@ -37,6 +38,7 @@ except ImportError:  # Direct execution from the src directory.
     from integrations.xui import XUIError
     from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
     from repositories import BillingRepository
+    from telegram_format import markdown_v2_escape as _markdown_v2_escape
     from services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
         ReconciliationRequiredError, ValidationError,
@@ -439,18 +441,7 @@ def format_expiring(clients) -> str:
 
 
 def markdown_v2_escape(value):
-    value = str(value)
-    value = value.replace("\\", "\\\\")
-
-    chars = r"_*[]()~`>#+-=|{}.!"
-
-    for char in chars:
-        value = value.replace(
-            char,
-            "\\" + char,
-        )
-
-    return value
+    return _markdown_v2_escape(value)
 
 
 # ============================================================

@@ -55,6 +55,7 @@ def test_runtime_requirements_are_minimal_and_exclude_pytest():
     requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     assert requirements == [
         "python-telegram-bot==20.8", "qrcode==7.4.2", "Pillow==10.2.0",
+        "tzdata>=2024.1,<2027",
     ]
     assert all("pytest" not in line.lower() for line in requirements)
 

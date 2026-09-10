@@ -19,6 +19,7 @@ class KarinaConfig:
     mobile_inbound_id: int = 5
     mobile_traffic_bytes: int = 50 * 1024 ** 3
     connect_dir: Path = Path("/var/www/karina/connect")
+    notifier_timezone: str = "Europe/Moscow"
 
 
 def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig:
@@ -88,4 +89,5 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         mobile_inbound_id=mobile_inbound_id,
         mobile_traffic_bytes=mobile_traffic_gb * 1024 ** 3,
         connect_dir=Path(values.get("CONNECT_DIR", "/var/www/karina/connect")),
+        notifier_timezone=values.get("NOTIFIER_TIMEZONE", "Europe/Moscow"),
     )

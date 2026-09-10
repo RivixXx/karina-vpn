@@ -146,10 +146,30 @@ PRIMARY_INBOUND_IDS=2,3,4
 MOBILE_INBOUND_ID=5
 MOBILE_TRAFFIC_GB=50
 CONNECT_DIR=/var/www/karina/connect
+NOTIFIER_TIMEZONE=Europe/Moscow
 ```
 
 `INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
 `.env`, database files, tokens, or credentials in Git.
+
+The recurring notifier scans logical primary users and sends one current expiry
+milestone (7, 3, 1 or expired) plus the highest newly reached mobile quota
+milestone (80%, 95% or 100%). Successful sends are persisted in SQLite. Quota
+cycles advance when a lower authoritative `usedTraffic` value or a changed quota
+is observed. If a complete reset and subsequent traffic growth happen between
+two scans, 3x-ui exposes no reliable reset identifier through the current client
+contract, so that reset cannot be distinguished from the preceding cycle.
+
+Validate a rollout without Telegram sends or database writes:
+
+```bash
+python -m src.notifier --dry-run
+python -m src.notifier --dry-run --user SomeUser
+```
+
+Internal `__mobile` credentials cannot be targeted directly. A non-blocking
+process lock prevents overlapping scheduled scans; persistent event keys remain
+the correctness guard across restarts and reboots.
 
 ### First Git Deployment
 

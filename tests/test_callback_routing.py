@@ -4,6 +4,7 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from src.telegram_format import markdown_v2_escape
 
 
 def run(coroutine):
@@ -69,6 +70,7 @@ def bot(source_functions, local_db):
         ParseMode=NS(MARKDOWN_V2="MarkdownV2"), SUPPORT_URL="https://example.test/support",
         build_client_service=lambda: service, EXPECTED_SERVICE_ERRORS=(RuntimeError,),
         LOGGER=NS(warning=Mock()),
+        _markdown_v2_escape=markdown_v2_escape,
     )
     functions["_service"] = service
     return functions
