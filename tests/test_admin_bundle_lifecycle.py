@@ -82,13 +82,18 @@ def admin(monkeypatch):
         validate_email=Mock(side_effect=lambda value: value), get_client=Mock(return_value=None),
         create_client_bundle=Mock(return_value=result),
         get_client_bundle=Mock(return_value=result.bundle),
+        get_primary_inbound_names=Mock(return_value=("Германия", "Германия 2", "Германия 3")),
         get_mobile_traffic=Mock(return_value=TrafficInfo(1024 ** 2, 50 * 1024 ** 3,
                                                          50 * 1024 ** 3 - 1024 ** 2,
                                                          1024 ** 2 / (50 * 1024 ** 3) * 100)),
         plan_mobile_migration=Mock(), migrate_client_to_mobile_bundle=Mock(),
-        extend_client=Mock(return_value=primary), set_hwid_limit=Mock(return_value=primary),
+        extend_client=Mock(return_value=primary), extend_bundle=Mock(return_value=primary),
+        set_hwid_limit=Mock(return_value=primary),
         disable_client=Mock(return_value=primary), enable_client=Mock(return_value=primary),
+        set_bundle_enabled=Mock(return_value=primary),
+        reissue_bundle_connection=Mock(return_value=result.subscription_page),
         reset_bundle_devices=Mock(), remove_bundle_device=Mock(),
+        delete_client_bundle=Mock(),
         get_devices=Mock(return_value=[]),
         get_traffic=Mock(return_value=TrafficInfo(0, 0, None, None)),
         list_clients=Mock(return_value=[primary]), get_expiring=Mock(return_value=[]),
@@ -187,7 +192,8 @@ def test_profile_is_bundle_level_and_callback_safe(admin):
     run(bot.admin_bundle_user(upd, "demo"))
     text = upd.callback_query.edit_message_text.call_args.args[0]
     markup = upd.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
-    assert "Основной VPN" in text and "50.0 ГБ" in text and "__mobile" not in text
+    assert "Основные подключения" in text and "50.0 ГБ" in text and "__mobile" not in text
+    assert "Германия 3" in text
     callbacks = [button.callback_data for row in markup.inline_keyboard for button in row
                  if getattr(button, "callback_data", None)]
     assert callbacks and all("demo" not in value and len(value.encode()) <= 64 for value in callbacks)
@@ -200,22 +206,103 @@ def test_profile_legacy_mobile_state(admin):
     upd = update("u:7")
     run(bot.admin_bundle_user(upd, "demo"))
     text = upd.callback_query.edit_message_text.call_args.args[0]
-    assert "ещё не активирован" in text and "__mobile" not in text
+    assert "Не подключена" in text and "__mobile" not in text
+
+
+def test_mobile_exhausted_and_traffic_failure_card(admin):
+    bundle = admin.get_client_bundle.return_value
+    exhausted = TrafficInfo(50 * 1024 ** 3, 50 * 1024 ** 3, 0, 100.0)
+    text = bot.format_bundle_profile(bundle, exhausted, ("Германия",))
+    assert "50.0 ГБ / 50.0 ГБ · лимит исчерпан" in text
+
+    admin.get_mobile_traffic.side_effect = ClientServiceError("synthetic")
+    upd = update("u:7")
+    run(bot.admin_bundle_user(upd, "demo"))
+    assert "Данные временно недоступны" in upd.callback_query.edit_message_text.call_args.args[0]
+
+
+def test_client_list_filters_mobile_and_paginates(admin):
+    clients = [client(f"user{i:02d}") for i in range(21)] + [client("hidden__mobile", True)]
+    admin.list_clients.return_value = clients
+    upd = update("admin_users")
+    run(bot.admin_users(upd, 0))
+    rows = upd.callback_query.edit_message_text.call_args.kwargs["reply_markup"].inline_keyboard
+    labels = [button.text for row in rows for button in row]
+    callbacks = [getattr(button, "callback_data", "") for row in rows for button in row]
+    assert not any("__mobile" in label for label in labels)
+    assert "admin_users:1" in callbacks
+
+
+def test_unlimited_extend_and_reset_require_confirmation(admin, monkeypatch):
+    monkeypatch.setattr(bot, "get_client_email_by_ref", lambda ref: "demo")
+    admin.get_client.return_value = client()
+    context = NS(user_data={})
+    run(bot.admin_bundle_action_callback(update("ueu:7"), context, "ueu:7"))
+    admin.extend_bundle.assert_called_once_with("demo", None)
+
+    run(bot.admin_bundle_action_callback(update("uda:7"), context, "uda:7"))
+    admin.reset_bundle_devices.assert_not_called()
+    run(bot.admin_bundle_action_callback(update("uday:7"), context, "uday:7"))
+    admin.reset_bundle_devices.assert_called_once_with("demo")
+
+
+def test_mobile_ref_and_expired_delete_confirmation_are_safe(admin, monkeypatch):
+    monkeypatch.setattr(bot, "get_client_email_by_ref", lambda ref: "demo__mobile")
+    context = NS(user_data={})
+    run(bot.admin_bundle_action_callback(update("ut:7"), context, "ut:7"))
+    admin.set_bundle_enabled.assert_not_called()
+
+    monkeypatch.setattr(bot, "get_client_email_by_ref", lambda ref: "demo")
+    context.user_data["delete_confirmation"] = {"ref": 7, "step": 1, "updated_at": 0}
+    monkeypatch.setattr(bot.time, "time", lambda: bot.ACTION_TIMEOUT_SECONDS + 1)
+    run(bot.admin_ref_callback(update("udc:7"), context, "udc:7"))
+    admin.delete_client_bundle.assert_not_called()
+
+
+def test_cancel_clears_destructive_state_and_hwid_lowering_warns(admin, monkeypatch):
+    monkeypatch.setattr(bot, "get_client_email_by_ref", lambda ref: "demo")
+    context = NS(user_data={
+        "delete_confirmation": {"ref": 7, "step": 1, "updated_at": 1},
+        "device_reset_confirmation": {"ref": 7, "updated_at": 1},
+    })
+    run(bot.admin_ref_callback(update("u:7"), context, "u:7"))
+    assert "delete_confirmation" not in context.user_data
+    assert "device_reset_confirmation" not in context.user_data
+
+    crowded = client()
+    crowded = crowded.__class__(**{**crowded.__dict__, "device_count": 3})
+    admin.get_client.return_value = crowded
+    upd = update("uh1:7")
+    run(bot.admin_bundle_action_callback(upd, context, "uh1:7"))
+    text = upd.callback_query.edit_message_text.call_args.args[0]
+    assert "Подключено устройств больше нового лимита" in text
+
+
+def test_bundle_card_dynamic_values_are_plain_text_safe(admin):
+    special = "Test-User_[device]+foo(bar)=x!{value}|"
+    primary = client(special)
+    admin.get_client_bundle.return_value = ClientBundle(primary, None)
+    admin.get_primary_inbound_names.return_value = (special,)
+    upd = update("u:7")
+    run(bot.admin_bundle_user(upd, special))
+    call = upd.callback_query.edit_message_text.call_args
+    assert special in call.args[0]
+    assert "parse_mode" not in call.kwargs
 
 
 def test_extend_hwid_toggle_and_device_actions_use_bundle_service(admin, monkeypatch):
     monkeypatch.setattr(bot, "get_client_email_by_ref", lambda ref: "demo")
     context = NS(user_data={})
-    for data in ("ue30:7", "uh5:7", "uda:7", "ur9:7"):
+    admin.get_client.return_value = client()
+    for data in ("ue30:7", "uh5:7", "uda:7", "uday:7", "ur9:7"):
         run(bot.admin_bundle_action_callback(update(data), context, data))
-    admin.extend_client.assert_called_once_with("demo", 30)
+    admin.extend_bundle.assert_called_once_with("demo", 30)
     admin.set_hwid_limit.assert_called_once_with("demo", 5)
     admin.reset_bundle_devices.assert_called_once_with("demo")
     admin.remove_bundle_device.assert_called_once_with("demo", 9)
 
-    admin.get_client.return_value = client()
     run(bot.admin_bundle_action_callback(update("ut:7"), context, "ut:7"))
-    admin.disable_client.assert_called_once_with("demo")
+    admin.set_bundle_enabled.assert_called_once_with("demo", False)
 
 
 def test_migration_requires_preview_and_second_confirmation(admin, monkeypatch):

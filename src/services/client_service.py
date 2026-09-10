@@ -298,6 +298,21 @@ class ClientService:
             return None
         return ClientBundle(primary, self.get_client(mobile_email_for(email)))
 
+    def get_primary_inbound_names(self, email) -> tuple[str, ...]:
+        primary = self.get_client(email)
+        if primary is None:
+            raise ClientNotFoundError(f"client {email} not found")
+        wanted = set(primary.inbound_ids)
+        names = []
+        for inbound in self._call(self.xui.list_inbounds, "inbound lookup failed"):
+            inbound_id = int(inbound.get("id", 0) or 0)
+            if inbound_id in wanted:
+                name = str(inbound.get("remark") or inbound.get("tag") or f"#{inbound_id}")
+                names.append((inbound_id, name))
+        known = {item[0] for item in names}
+        names.extend((inbound_id, f"#{inbound_id}") for inbound_id in wanted - known)
+        return tuple(name for _, name in sorted(names))
+
     def migrate_client_to_mobile_bundle(self, email):
         plan = self.plan_mobile_migration(email)
         if plan.blocking_errors:
@@ -496,20 +511,57 @@ class ClientService:
             mobile_email = mobile_email_for(email)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        _, primary_obj = self._require_raw(email)
+        target_expiry = (
+            max(int(primary_obj["client"].get("expiryTime", 0) or 0), now)
+            + days * 86400000
+        )
         mobile_exists = self.get_client(mobile_email) is not None
-        primary = self._update(email, lambda client: client.__setitem__(
-            "expiryTime", max(int(client.get("expiryTime", 0) or 0), now) + days * 86400000
-        ))
         if mobile_exists:
+            def synchronize_mobile_expiry(client):
+                client["expiryTime"] = target_expiry
+                client["limitHwid"] = 0
             try:
-                self._update(mobile_email, lambda client: client.__setitem__(
-                    "expiryTime", primary.expiry_time_ms
-                ))
+                self._update(mobile_email, synchronize_mobile_expiry)
             except ClientServiceError as exc:
                 raise ReconciliationRequiredError(
-                    "primary extended but mobile expiry synchronization failed"
+                    "mobile expiry update failed; primary was not changed"
                 ) from exc
-        return primary
+        try:
+            return self._update(
+                email, lambda client: client.__setitem__("expiryTime", target_expiry)
+            )
+        except ClientServiceError as exc:
+            if mobile_exists:
+                raise ReconciliationRequiredError(
+                    "mobile extended but primary expiry update failed"
+                ) from exc
+            raise
+
+    def extend_bundle(self, email, days) -> ClientInfo:
+        if days is not None:
+            return self.extend_client(email, days)
+        mobile_email = mobile_email_for(email)
+        self._require_raw(email)
+        mobile_exists = self.get_client(mobile_email) is not None
+        if mobile_exists:
+            def make_mobile_unlimited(client):
+                client["expiryTime"] = 0
+                client["limitHwid"] = 0
+            try:
+                self._update(mobile_email, make_mobile_unlimited)
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "mobile unlimited update failed; primary was not changed"
+                ) from exc
+        try:
+            return self._update(email, lambda client: client.__setitem__("expiryTime", 0))
+        except ClientServiceError as exc:
+            if mobile_exists:
+                raise ReconciliationRequiredError(
+                    "mobile made unlimited but primary expiry update failed"
+                ) from exc
+            raise
 
     def enable_client(self, email) -> ClientInfo:
         return self._set_bundle_enabled(email, True)
@@ -517,13 +569,21 @@ class ClientService:
     def disable_client(self, email) -> ClientInfo:
         return self._set_bundle_enabled(email, False)
 
+    def set_bundle_enabled(self, email, enabled) -> ClientInfo:
+        if not isinstance(enabled, bool):
+            raise ValidationError("enabled must be boolean")
+        return self._set_bundle_enabled(email, enabled)
+
     def _set_bundle_enabled(self, email, enabled):
         mobile_email = mobile_email_for(email)
         mobile_exists = self.get_client(mobile_email) is not None
         primary = self._update(email, lambda client: client.__setitem__("enable", enabled))
         if mobile_exists:
+            def synchronize_mobile_enabled(client):
+                client["enable"] = enabled
+                client["limitHwid"] = 0
             try:
-                self._update(mobile_email, lambda client: client.__setitem__("enable", enabled))
+                self._update(mobile_email, synchronize_mobile_enabled)
             except ClientServiceError as exc:
                 raise ReconciliationRequiredError(
                     "primary updated but mobile state synchronization failed"
@@ -617,6 +677,9 @@ class ClientService:
         if not page:
             raise ClientServiceError("subscription verification failed")
         return page
+
+    def reissue_bundle_connection(self, email) -> str:
+        return self.ensure_connection(email)
 
     def get_traffic(self, email) -> TrafficInfo:
         _, obj = self._require_raw(email)

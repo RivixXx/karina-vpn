@@ -50,10 +50,12 @@ def bot(source_functions, local_db):
         get_client=Mock(side_effect=lambda email: client(email)),
         get_client_bundle=Mock(side_effect=lambda email: NS(primary=client(email), mobile=None)),
         get_mobile_traffic=Mock(return_value=None),
+        get_primary_inbound_names=Mock(return_value=("Germany",)),
         list_clients=Mock(return_value=[client()]),
         get_devices=Mock(return_value=[]),
         get_bundle_devices=Mock(return_value=[]),
         ensure_connection=Mock(return_value="https://example.test/connect/fresh.html"),
+        reissue_bundle_connection=Mock(return_value="https://example.test/connect/fresh.html"),
         get_expiring=Mock(return_value=[]),
         delete_client=Mock(return_value=client()),
         delete_client_bundle=Mock(return_value=client()),
@@ -61,6 +63,8 @@ def bot(source_functions, local_db):
     functions = source_functions(
         "bot.py", names, db_connect=connect, closing=closing, sqlite3=sqlite3,
         time=NS(time=lambda: 1000), ChatType=NS(PRIVATE="private"), ADMIN_TG_ID=1,
+        ACTION_TIMEOUT_SECONDS=600, ADMIN_USERS_PAGE_SIZE=20,
+        is_mobile_email=lambda email: email.endswith("__mobile"),
         InlineKeyboardButton=button, InlineKeyboardMarkup=lambda rows: rows,
         ParseMode=NS(MARKDOWN_V2="MarkdownV2"), SUPPORT_URL="https://example.test/support",
         build_client_service=lambda: service, EXPECTED_SERVICE_ERRORS=(RuntimeError,),
@@ -118,7 +122,7 @@ def test_admin_list_uses_client_service_and_long_ref(bot):
 def test_admin_connection_repairs_before_showing_url(bot):
     ref = bot["get_or_create_client_ref"]("demo_target")
     upd = invoke(bot, f"uc:{ref}")
-    bot["_service"].ensure_connection.assert_called_once_with("demo_target")
+    bot["_service"].reissue_bundle_connection.assert_called_once_with("demo_target")
     rows = upd.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
     assert any(getattr(item, "url", "") == "https://example.test/connect/fresh.html"
                for row in rows for item in row)
@@ -133,6 +137,7 @@ def test_delete_success_and_double_callback(bot, local_db, warning):
     context = NS(user_data={})
     invoke(bot, f"udel:{ref}", context)
     bot["_service"].delete_client_bundle.assert_not_called()
+    invoke(bot, f"udc:{ref}", context)
     invoke(bot, f"uy:{ref}", context)
     after = state(local_db)
     bot["_service"].delete_client_bundle.assert_called_once_with("demo_target")
@@ -152,6 +157,7 @@ def test_service_delete_failure_preserves_local_access(bot, local_db):
     bot["_service"].delete_client_bundle.side_effect = RuntimeError("synthetic")
     context = NS(user_data={})
     invoke(bot, f"udel:{ref}", context)
+    invoke(bot, f"udc:{ref}", context)
     invoke(bot, f"uy:{ref}", context)
     assert state(local_db) == before
 
@@ -161,7 +167,9 @@ def test_local_failure_rolls_back_and_retries_without_service_delete(bot, local_
     before = state(local_db)
     with closing(local_db()) as db, db:
         db.execute("CREATE TRIGGER fail_ref BEFORE DELETE ON client_refs BEGIN SELECT RAISE(ABORT, 'test'); END")
-    context = NS(user_data={"delete_confirmation": ref})
+    context = NS(user_data={
+        "delete_confirmation": {"ref": ref, "step": 2, "updated_at": 1000},
+    })
     invoke(bot, f"uy:{ref}", context)
     assert state(local_db) == before
     with closing(local_db()) as db, db:

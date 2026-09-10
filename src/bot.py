@@ -183,7 +183,7 @@ def delete_client_ref(email, db=None):
 
 
 def client_callback(action, email):
-    if action not in {"u", "ub", "ud", "uc", "udel", "uy"}:
+    if action not in {"u", "ub", "ud", "uc", "udel", "udc", "uy"}:
         raise ValueError("Unknown client action")
     return f"{action}:{get_or_create_client_ref(email)}"
 
@@ -384,23 +384,31 @@ def format_admin_stats(clients) -> str:
     )
 
 
-def format_bundle_profile(bundle, mobile_traffic) -> str:
+def format_bundle_profile(
+        bundle, mobile_traffic, inbound_names=None, traffic_unavailable=False) -> str:
     primary = bundle.primary
     status_icon = {"active": "🟢", "expired": "🟠"}.get(primary.status, "🔴")
     expiry = "безлимит" if not primary.expiry_time_ms else primary.expiry_text
     lines = [
-        f"👤 {primary.email}", "", f"{status_icon} {status_text(primary.status)}",
-        f"📅 Срок: {expiry}", f"📱 HWID: {primary.device_limit or '∞'}", "",
-        "🌐 Основной VPN", "Безлимит", "", "📡 Карина против глушилок",
+        f"👤 {primary.email}", "", f"Статус: {status_icon} {status_text(primary.status)}",
+        f"До: {expiry}",
+        f"Устройства: {primary.device_count} / {primary.device_limit or '∞'}", "",
+        "Основные подключения:",
     ]
-    if bundle.mobile is None or mobile_traffic is None:
-        lines.append("Отдельный мобильный лимит ещё не активирован.")
+    inbound_names = inbound_names or ()
+    lines.extend(f"🇩🇪 {name}" for name in inbound_names)
+    if not inbound_names:
+        lines.append("Нет активных подключений")
+    lines.extend(["", "📱 Карина против глушилок"])
+    if bundle.mobile is None:
+        lines.append("Не подключена")
+    elif traffic_unavailable or mobile_traffic is None:
+        lines.append("Данные временно недоступны")
     elif mobile_traffic.limit_bytes and mobile_traffic.percent_used is not None:
-        lines.extend([
-            f"{bytes_to_human(mobile_traffic.used_bytes)} / {bytes_to_human(mobile_traffic.limit_bytes)}",
-            f"Осталось: {bytes_to_human(mobile_traffic.remaining_bytes)}",
-            f"Использовано: {mobile_traffic.percent_used:.1f}%",
-        ])
+        usage = f"{bytes_to_human(mobile_traffic.used_bytes)} / {bytes_to_human(mobile_traffic.limit_bytes)}"
+        if mobile_traffic.used_bytes >= mobile_traffic.limit_bytes:
+            usage += " · лимит исчерпан"
+        lines.append(usage)
     else:
         lines.append("⚠️ Мобильный лимит требует проверки.")
     return "\n".join(lines)
@@ -736,7 +744,11 @@ async def render_admin_home(update):
         )
 
 
-async def admin_users(update):
+ADMIN_USERS_PAGE_SIZE = 20
+ACTION_TIMEOUT_SECONDS = 600
+
+
+async def admin_users(update, page=0):
     try:
         clients = build_client_service().list_clients()
     except EXPECTED_SERVICE_ERRORS as exc:
@@ -744,22 +756,32 @@ async def admin_users(update):
             f"❌ {markdown_v2_escape(safe_user_error(exc, admin=True))}"
         )
         return
+    page = max(int(page), 0)
     rows = []
-    for client in clients:
+    clients = [client for client in clients if not is_mobile_email(client.email)]
+    pages = max((len(clients) + ADMIN_USERS_PAGE_SIZE - 1) // ADMIN_USERS_PAGE_SIZE, 1)
+    page = min(page, pages - 1)
+    for client in clients[page * ADMIN_USERS_PAGE_SIZE:(page + 1) * ADMIN_USERS_PAGE_SIZE]:
         email = client.email
         linked = get_link_by_email(email)
         link_icon = "🔗" if linked else "⚪"
         status_icon = {"active": "🟢", "expired": "🟠"}.get(client.status, "🔴")
-        device_limit = client.device_limit or "∞"
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"{link_icon} {status_icon} {email} · {client.device_count}/{device_limit} · {client.expiry_text}",
+                    f"{link_icon} {status_icon} {email} · {status_text(client.status).lower()} · до {client.expiry_text[:5]}",
                     callback_data=client_callback("u", email),
                 )
             ]
         )
 
+    navigation = []
+    if page:
+        navigation.append(InlineKeyboardButton("⬅", callback_data=f"admin_users:{page - 1}"))
+    if page + 1 < pages:
+        navigation.append(InlineKeyboardButton("➡", callback_data=f"admin_users:{page + 1}"))
+    if navigation:
+        rows.append(navigation)
     rows.append(
         [
             InlineKeyboardButton(
@@ -857,27 +879,35 @@ async def admin_user(update, email):
     )
 
 
-async def admin_bundle_user(update, email):
+async def admin_bundle_user(update, email, notice=None):
     try:
         service = build_client_service()
         bundle = service.get_client_bundle(email)
-        traffic = service.get_mobile_traffic(email) if bundle and bundle.mobile else None
+        inbound_names = service.get_primary_inbound_names(email) if bundle else ()
     except EXPECTED_SERVICE_ERRORS as exc:
         await update.callback_query.edit_message_text(safe_user_error(exc, admin=True))
         return
     if bundle is None:
         await update.callback_query.edit_message_text("Пользователь больше не существует")
         return
+    traffic = None
+    traffic_unavailable = False
+    if bundle.mobile:
+        try:
+            traffic = service.get_mobile_traffic(email)
+        except EXPECTED_SERVICE_ERRORS:
+            LOGGER.warning("Mobile traffic lookup failed", exc_info=True)
+            traffic_unavailable = True
     ref_id = get_or_create_client_ref(email)
     linked = get_link_by_email(email)
     bind_text = "🔄 Перепривязать Telegram" if linked else "🔗 Привязать Telegram"
     toggle = "⛔ Отключить" if bundle.primary.enabled else "✅ Включить"
     rows = [
-        [InlineKeyboardButton("🔑 Подключение", callback_data=f"uc:{ref_id}"),
-         InlineKeyboardButton("📱 Устройства", callback_data=f"ud:{ref_id}")],
-        [InlineKeyboardButton("⏳ Продлить", callback_data=f"ue:{ref_id}"),
-         InlineKeyboardButton("🎚 HWID", callback_data=f"uh:{ref_id}")],
+        [InlineKeyboardButton("⏳ Продлить", callback_data=f"ue:{ref_id}")],
+        [InlineKeyboardButton("🎚 Лимит устройств", callback_data=f"uh:{ref_id}")],
+        [InlineKeyboardButton("♻ Сбросить устройства", callback_data=f"uda:{ref_id}")],
         [InlineKeyboardButton(toggle, callback_data=f"ut:{ref_id}")],
+        [InlineKeyboardButton("🔄 Перевыпустить подключение", callback_data=f"uc:{ref_id}")],
         [InlineKeyboardButton(bind_text, callback_data=f"ub:{ref_id}")],
     ]
     if bundle.mobile is None:
@@ -887,7 +917,9 @@ async def admin_bundle_user(update, email):
         [InlineKeyboardButton("⬅ Назад", callback_data="admin_users")],
     ])
     await update.callback_query.edit_message_text(
-        format_bundle_profile(bundle, traffic), reply_markup=InlineKeyboardMarkup(rows),
+        ((notice + "\n\n") if notice else "")
+        + format_bundle_profile(bundle, traffic, inbound_names, traffic_unavailable),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -896,14 +928,15 @@ async def admin_ref_callback(update, context, data):
         return
     query = update.callback_query
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Пользователи", callback_data="admin_users")]])
-    match = re.fullmatch(r"(u|ub|ud|uc|udel|uy):([1-9][0-9]{0,18})", data)
+    match = re.fullmatch(r"(u|ub|ud|uc|udel|udc|uy):([1-9][0-9]{0,18})", data)
     email = get_client_email_by_ref(int(match[2])) if match else None
-    if email is None:
+    if email is None or is_mobile_email(email):
         await query.edit_message_text("Пользователь больше не существует", reply_markup=back)
         return
     action, ref_id = match[1], int(match[2])
     if action == "u":
         context.user_data.pop("delete_confirmation", None)
+        context.user_data.pop("device_reset_confirmation", None)
         await admin_bundle_user(update, email)
         return
     # Keep a successful service result for retry if SQLite cleanup fails.
@@ -938,29 +971,51 @@ async def admin_ref_callback(update, context, data):
                 text = safe_user_error(exc, admin=True)
         else:
             try:
-                url = service.ensure_connection(email)
+                url = service.reissue_bundle_connection(email)
             except EXPECTED_SERVICE_ERRORS as exc:
                 await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
                 return
             if url:
                 rows.insert(0, [InlineKeyboardButton("💗 Подключить Карина VPN", url=url)])
-            text = "🔗 Подключение"
+            text = "✅ Подключение перевыпущено"
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
     elif action == "udel":
-        context.user_data["delete_confirmation"] = ref_id
+        context.user_data["delete_confirmation"] = {
+            "ref": ref_id, "step": 1, "updated_at": time.time(),
+        }
         await query.edit_message_text(
             f"⚠️ Удалить пользователя {email}?\n\n"
-            "Будут удалены:\n• VPN-клиент\n• ссылка подключения\n"
-            "• Telegram-привязка\n• активные ссылки привязки\n\n"
-            "История уведомлений и заказов сохранится.",
+            "Будут удалены:\n• основной профиль\n• мобильный профиль\n"
+            "• привязки устройств\n• внешняя мобильная подписка\n"
+            "• файлы подключения\n\nДействие необратимо.",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗑 Да, удалить", callback_data=f"uy:{ref_id}")],
+                [InlineKeyboardButton("Продолжить", callback_data=f"udc:{ref_id}")],
+                [InlineKeyboardButton("Отмена", callback_data=f"u:{ref_id}")],
+            ]),
+        )
+    elif action == "udc":
+        state = context.user_data.get("delete_confirmation", {})
+        if (state.get("ref") != ref_id or state.get("step") != 1
+                or time.time() - state.get("updated_at", 0) > ACTION_TIMEOUT_SECONDS):
+            context.user_data.pop("delete_confirmation", None)
+            await query.edit_message_text("Подтверждение устарело. Откройте профиль снова.", reply_markup=back)
+            return
+        context.user_data["delete_confirmation"] = {
+            "ref": ref_id, "step": 2, "updated_at": time.time(),
+        }
+        await query.edit_message_text(
+            f"Подтвердите удаление пользователя {email}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("УДАЛИТЬ", callback_data=f"uy:{ref_id}")],
                 [InlineKeyboardButton("Отмена", callback_data=f"u:{ref_id}")],
             ]),
         )
     elif action == "uy":
         if not retry_cleanup:
-            if context.user_data.get("delete_confirmation") != ref_id:
+            state = context.user_data.get("delete_confirmation", {})
+            if (state.get("ref") != ref_id or state.get("step") != 2
+                    or time.time() - state.get("updated_at", 0) > ACTION_TIMEOUT_SECONDS):
+                context.user_data.pop("delete_confirmation", None)
                 await query.edit_message_text("Подтвердите удаление в профиле пользователя.", reply_markup=back)
                 return
             try:
@@ -1172,12 +1227,12 @@ async def admin_bundle_action_callback(update, context, data):
     if not is_private_chat(update) or not is_admin(update):
         return
     query = update.callback_query
-    match = re.fullmatch(r"(ue|uh|ut|uda|um|umy|ue(?:30|90|180|365)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):([1-9][0-9]{0,18})", data)
+    match = re.fullmatch(r"(ue|uh|ut|uda|uday|um|umy|ue(?:30|90|180|365|u)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):([1-9][0-9]{0,18})", data)
     if not match:
         return
     action, ref_id = match[1], int(match[2])
     email = get_client_email_by_ref(ref_id)
-    if email is None:
+    if email is None or is_mobile_email(email):
         await query.edit_message_text("Пользователь больше не существует")
         return
     back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Профиль", callback_data=f"u:{ref_id}")]])
@@ -1187,30 +1242,57 @@ async def admin_bundle_action_callback(update, context, data):
             await query.edit_message_text("На сколько продлить?", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(f"{days} дней", callback_data=f"ue{days}:{ref_id}")]
                 for days in (30, 90, 180, 365)
-            ] + [[InlineKeyboardButton("❌ Отмена", callback_data=f"u:{ref_id}")]]))
+            ] + [[InlineKeyboardButton("Без срока", callback_data=f"ueu:{ref_id}")],
+                 [InlineKeyboardButton("❌ Отмена", callback_data=f"u:{ref_id}")]]))
         elif action.startswith("ue"):
-            client = service.extend_client(email, int(action[2:]))
-            await query.edit_message_text(f"✅ Новый срок: {client.expiry_text}", reply_markup=back)
+            days = None if action == "ueu" else int(action[2:])
+            client = service.extend_bundle(email, days)
+            await admin_bundle_user(
+                update, email,
+                "✅ Срок обновлён: без срока" if days is None else f"✅ Новый срок: {client.expiry_text}",
+            )
         elif action == "uh":
             await query.edit_message_text("Выберите HWID:", reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(str(value) if value else "Безлимит", callback_data=f"uh{value}:{ref_id}")]
                 for value in (1, 2, 3, 5, 0)
             ] + [[InlineKeyboardButton("❌ Отмена", callback_data=f"u:{ref_id}")]]))
         elif action.startswith("uh"):
-            service.set_hwid_limit(email, int(action[2:]))
-            await query.edit_message_text("✅ HWID обновлён для всего bundle", reply_markup=back)
+            current = service.get_client(email)
+            limit = int(action[2:])
+            service.set_hwid_limit(email, limit)
+            notice = "✅ Лимит устройств обновлён"
+            if limit and current.device_count > limit:
+                notice += ("\n⚠️ Подключено устройств больше нового лимита. "
+                           "При необходимости сбросьте устройства.")
+            await admin_bundle_user(update, email, notice)
         elif action == "ut":
             client = service.get_client(email)
             if client.enabled:
-                service.disable_client(email)
-                text = "⛔ Bundle отключён"
+                service.set_bundle_enabled(email, False)
+                text = "⛔ Пользователь отключён"
             else:
-                service.enable_client(email)
-                text = "✅ Bundle включён"
-            await query.edit_message_text(text, reply_markup=back)
+                service.set_bundle_enabled(email, True)
+                text = "✅ Пользователь включён"
+            await admin_bundle_user(update, email, text)
         elif action == "uda":
+            context.user_data["device_reset_confirmation"] = {
+                "ref": ref_id, "updated_at": time.time(),
+            }
+            await query.edit_message_text(
+                f"Сбросить привязанные устройства пользователя {email}?",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Да, сбросить", callback_data=f"uday:{ref_id}")],
+                    [InlineKeyboardButton("Отмена", callback_data=f"u:{ref_id}")],
+                ]),
+            )
+        elif action == "uday":
+            state = context.user_data.pop("device_reset_confirmation", {})
+            if (state.get("ref") != ref_id
+                    or time.time() - state.get("updated_at", 0) > ACTION_TIMEOUT_SECONDS):
+                await query.edit_message_text("Подтверждение устарело. Откройте профиль снова.", reply_markup=back)
+                return
             service.reset_bundle_devices(email)
-            await query.edit_message_text("✅ Устройства сброшены", reply_markup=back)
+            await admin_bundle_user(update, email, "✅ Устройства сброшены")
         elif action.startswith("ur"):
             service.remove_bundle_device(email, int(action[2:]))
             await query.edit_message_text("✅ Устройство удалено", reply_markup=back)
@@ -1352,11 +1434,11 @@ async def callbacks(
         if is_admin(update):
             await admin_create_callback(update, context, data)
         return
-    if re.fullmatch(r"(?:ue|uh|ut|uda|um|umy|ue(?:30|90|180|365)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):.*", data):
+    if re.fullmatch(r"(?:ue|uh|ut|uda|uday|um|umy|ue(?:30|90|180|365|u)|uh(?:0|1|2|3|5)|ur[1-9][0-9]{0,18}):.*", data):
         if is_admin(update):
             await admin_bundle_action_callback(update, context, data)
         return
-    if re.fullmatch(r"(?:u|ub|ud|uc|udel|uy):.*", data):
+    if re.fullmatch(r"(?:u|ub|ud|uc|udel|udc|uy):.*", data):
         if is_admin(update):
             await admin_ref_callback(update, context, data)
         return
@@ -1369,9 +1451,10 @@ async def callbacks(
             )
             return
 
-        if data == "admin_users":
+        users_match = re.fullmatch(r"admin_users(?::([0-9]+))?", data)
+        if users_match:
             await admin_users(
-                update
+                update, int(users_match[1] or 0)
             )
             return
 

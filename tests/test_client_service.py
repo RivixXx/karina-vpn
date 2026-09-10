@@ -620,6 +620,138 @@ def test_bundle_extend_hwid_toggle_and_mobile_traffic(config, tmp_path):
     assert traffic.used_bytes == 1024 ** 2 and traffic.limit_bytes == 50 * 1024 ** 3
 
 
+def test_finite_bundle_extension_retry_does_not_double_extend(config, tmp_path):
+    clients = bundle_clients()
+    primary_before = deepcopy(clients["demo"])
+    mobile_before = deepcopy(clients["demo__mobile"])
+    primary_before["client"].update({"uuid": "primary-uuid", "subId": "primary_sub123"})
+    mobile_before["client"].update({"uuid": "mobile-uuid", "subId": "mobile_sub123"})
+    clients = {"demo": primary_before, "demo__mobile": mobile_before}
+    service, xui = make_service(config, tmp_path, clients)
+    original = xui.update_client
+    primary_failures = 1
+
+    def fail_primary_once(email, payload):
+        nonlocal primary_failures
+        if email == "demo" and primary_failures:
+            primary_failures -= 1
+            raise XUIOperationError("synthetic")
+        original(email, payload)
+
+    xui.update_client = fail_primary_once
+    target = NOW + 31 * DAY
+    with pytest.raises(ReconciliationRequiredError):
+        service.extend_bundle("demo", 30)
+    assert xui.clients["demo"]["client"]["expiryTime"] == NOW + DAY
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == target
+
+    service.extend_bundle("demo", 30)
+    assert xui.clients["demo"]["client"]["expiryTime"] == target
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == target
+    assert [email for email, _ in xui.updated] == ["demo__mobile", "demo__mobile", "demo"]
+    for email, before in (("demo", primary_before), ("demo__mobile", mobile_before)):
+        after = xui.clients[email]
+        assert after["client"]["uuid"] == before["client"]["uuid"]
+        assert after["client"]["subId"] == before["client"]["subId"]
+        assert after["client"]["limitHwid"] == before["client"]["limitHwid"]
+        assert after["client"]["totalGB"] == before["client"]["totalGB"]
+        assert after["inboundIds"] == before["inboundIds"]
+
+
+def test_expired_bundle_extension_uses_now_as_base(config, tmp_path):
+    clients = bundle_clients()
+    clients["demo"]["client"]["expiryTime"] = NOW - DAY
+    service, xui = make_service(config, tmp_path, clients)
+    service.extend_bundle("demo", 30)
+    assert xui.clients["demo"]["client"]["expiryTime"] == NOW + 30 * DAY
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == NOW + 30 * DAY
+
+
+def test_unlimited_bundle_extension_uses_now_as_base(config, tmp_path):
+    clients = bundle_clients()
+    clients["demo"]["client"]["expiryTime"] = 0
+    service, xui = make_service(config, tmp_path, clients)
+    service.extend_bundle("demo", 30)
+    assert xui.clients["demo"]["client"]["expiryTime"] == NOW + 30 * DAY
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == NOW + 30 * DAY
+
+
+def test_primary_only_extension_keeps_legacy_behavior(config, tmp_path):
+    service, xui = make_service(
+        config, tmp_path, {"demo": raw_client("demo", expiry=NOW + DAY)},
+    )
+    service.extend_bundle("demo", 30)
+    assert xui.clients["demo"]["client"]["expiryTime"] == NOW + 31 * DAY
+    assert [email for email, _ in xui.updated] == ["demo"]
+
+
+def test_mobile_extension_failure_leaves_primary_unchanged(config, tmp_path):
+    service, xui = make_service(config, tmp_path, bundle_clients())
+    original_primary = deepcopy(xui.clients["demo"])
+
+    def fail_mobile(email, payload):
+        if email == "demo__mobile":
+            raise XUIOperationError("synthetic")
+        pytest.fail("primary must not be updated after mobile failure")
+
+    xui.update_client = fail_mobile
+    with pytest.raises(ReconciliationRequiredError):
+        service.extend_bundle("demo", 30)
+    assert xui.clients["demo"] == original_primary
+
+
+def test_bundle_inbound_names_and_unlimited_expiry_sync(config, tmp_path):
+    clients = bundle_clients()
+    clients["demo__mobile"]["client"]["limitHwid"] = 5
+    inbounds = [
+        {"id": 1, "remark": "Германия"}, {"id": 2, "remark": "Германия 2"},
+    ]
+    service, xui = make_service(config, tmp_path, clients, inbounds)
+    assert service.get_primary_inbound_names("demo") == ("Германия", "Германия 2")
+    service.extend_bundle("demo", None)
+    assert xui.clients["demo"]["client"]["expiryTime"] == 0
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == 0
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
+
+
+def test_lower_hwid_does_not_delete_devices_and_repairs_mobile(config, tmp_path):
+    clients = bundle_clients()
+    clients["demo__mobile"]["client"]["limitHwid"] = 5
+    service, xui = make_service(
+        config, tmp_path, clients,
+        devices={"demo": [{"id": 1}, {"id": 2}, {"id": 3}]},
+    )
+    service.set_hwid_limit("demo", 1)
+    assert xui.clients["demo"]["client"]["limitHwid"] == 1
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
+    assert not xui.removed_devices and not xui.reset
+
+
+def test_enable_expired_bundle_does_not_renew(config, tmp_path):
+    clients = {
+        "demo": raw_client("demo", expiry=NOW - DAY, enabled=False),
+        "demo__mobile": raw_client("demo__mobile", expiry=NOW - DAY, enabled=False,
+                                      hwid=5, inbounds=(5,)),
+    }
+    service, xui = make_service(config, tmp_path, clients)
+    service.set_bundle_enabled("demo", True)
+    assert xui.clients["demo"]["client"]["expiryTime"] == NOW - DAY
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == NOW - DAY
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
+
+
+def test_reissue_bundle_uses_readback_without_recreating_credentials(config, tmp_path):
+    issued = []
+    service, xui = make_service(
+        config, tmp_path, {"demo": raw_client("demo", sub_id="authoritative123")},
+        issue=lambda sub_id: issued.append(sub_id) or f"page/{sub_id}",
+    )
+    before = deepcopy(xui.clients)
+    assert service.reissue_bundle_connection("demo") == "page/authoritative123"
+    assert issued == ["authoritative123"] and xui.clients == before
+    assert xui.created_payload is None and not xui.updated
+
+
 def test_bundle_devices_are_merged_and_mutated_without_mobile_name(config, tmp_path):
     raw = lambda identifier, model: {"id": identifier, "deviceModel": model}
     service, xui = make_service(
@@ -647,13 +779,14 @@ def test_connection_uses_fresh_authoritative_subid(config, tmp_path):
 
 def test_bundle_delete_mobile_then_primary(config, tmp_path):
     for sub_id in ("safe_id123", "mobile_id123"):
-        (tmp_path / f"{sub_id}.html").write_text("page", encoding="utf-8")
+        for suffix in (".html", ".png"):
+            (tmp_path / f"{sub_id}{suffix}").write_text("page", encoding="utf-8")
     clients = bundle_clients()
     service, xui = make_service(config, tmp_path, clients)
     result = service.delete_client_bundle("demo")
     assert result.removed
     assert xui.deleted == ["demo__mobile", "demo"]
-    assert not list(tmp_path.glob("*.html"))
+    assert not list(tmp_path.glob("*.html")) and not list(tmp_path.glob("*.png"))
 
 
 def test_bundle_delete_partial_failure_requires_reconciliation(config, tmp_path):
