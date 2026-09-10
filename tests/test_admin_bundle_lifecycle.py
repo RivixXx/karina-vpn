@@ -435,7 +435,7 @@ def test_stale_telegram_link_has_controlled_recovery_path(admin):
     upd = update("client_home")
     run(bot.render_client_home(upd, "stale_user"))
     text = upd.callback_query.edit_message_text.call_args.args[0]
-    assert "Привязка Telegram найдена" in text
+    assert "Привязка сохранена" in text
     assert "восстановления доступа" in text
     assert "Подписка не найдена" not in text
 

@@ -40,6 +40,7 @@ class BillingRepository:
                     created_at INTEGER NOT NULL,
                     paid_at INTEGER,
                     applied_at INTEGER
+                    , order_kind TEXT NOT NULL DEFAULT 'renewal'
                 );
                 CREATE INDEX IF NOT EXISTS idx_orders_tg ON orders(tg_id);
                 CREATE INDEX IF NOT EXISTS idx_orders_email ON orders(email);
@@ -47,6 +48,9 @@ class BillingRepository:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_payment_unique
                     ON orders(provider_payment_id) WHERE provider_payment_id IS NOT NULL;
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(orders)")}
+            if "order_kind" not in columns:
+                db.execute("ALTER TABLE orders ADD COLUMN order_kind TEXT NOT NULL DEFAULT 'renewal'")
 
     @staticmethod
     def _order(row):
@@ -58,6 +62,7 @@ class BillingRepository:
             status=OrderStatus(row["status"]), provider=row["provider"],
             provider_payment_id=row["provider_payment_id"], created_at=row["created_at"],
             paid_at=row["paid_at"], applied_at=row["applied_at"],
+            kind=row["order_kind"] if "order_kind" in row.keys() else "renewal",
         )
 
     def create_order(self, order, plan_title):
@@ -66,12 +71,12 @@ class BillingRepository:
                 INSERT INTO orders
                     (order_id, tg_id, email, plan_id, plan_title, days, amount,
                      currency, status, provider, provider_payment_id, created_at,
-                     paid_at, applied_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'RUB', ?, ?, ?, ?, ?, ?)
+                     paid_at, applied_at, order_kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'RUB', ?, ?, ?, ?, ?, ?, ?)
             """, (order.id, order.tg_id, order.email, order.plan_id, plan_title,
                   order.days, order.amount_rub, order.status.value, order.provider,
                   order.provider_payment_id, order.created_at, order.paid_at,
-                  order.applied_at))
+                  order.applied_at, order.kind))
         return self.get_order(order.id)
 
     def get_order(self, order_id):
@@ -86,6 +91,21 @@ class BillingRepository:
                 (tg_id, limit),
             ).fetchall()
         return [self._order(row) for row in rows]
+
+    def get_pending_for_user(self, tg_id):
+        with closing(self._connect()) as db:
+            row = db.execute(
+                "SELECT * FROM orders WHERE tg_id = ? AND status = 'pending' "
+                "ORDER BY id DESC LIMIT 1", (tg_id,),
+            ).fetchone()
+        return self._order(row)
+
+    def approve_pending(self, order_id, applied_at):
+        """Finalize a manually confirmed order after provisioning succeeds."""
+        return self._transition(
+            order_id, OrderStatus.PENDING, OrderStatus.COMPLETED,
+            "paid_at = ?, applied_at = ?", (applied_at, applied_at),
+        )
 
     def update_provider_reference(self, order_id, provider, provider_payment_id):
         return self._update(order_id, "provider = ?, provider_payment_id = ?",

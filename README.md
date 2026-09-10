@@ -150,10 +150,30 @@ NOTIFIER_TIMEZONE=Europe/Moscow
 REQUIRED_TG_CHAT_ID=-1000000000000
 REQUIRED_TG_CHAT_URL=https://t.me/your_group
 REQUIRED_MEMBERSHIP_MODE=new_users
+MENU_ANIMATION_FILE_ID=
+CONNECT_VIDEO_FILE_ID=
+NEWS_CHANNEL_URL=https://t.me/your_channel
+SUPPORT_URL=https://t.me/your_support
+HAPP_ANDROID_URL=
+HAPP_IOS_URL=
+HAPP_WINDOWS_URL=
+HAPP_MACOS_URL=
+TELEGRAPH_ANDROID_URL=
+TELEGRAPH_IOS_URL=
+TELEGRAPH_WINDOWS_URL=
+TELEGRAPH_MACOS_URL=
 ```
 
 `INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
 `.env`, database files, tokens, or credentials in Git.
+
+Media and help links are optional. To obtain a reusable Telegram `file_id`, an
+operator sends the animation or video to the bot in a private test chat and
+reads the `file_id` from a temporary diagnostic handler or a trusted Telegram
+update inspection tool. Store only that identifier in `config.env`; never put
+the bot token in a command, screenshot, log, README, or Git. A missing or stale
+media identifier falls back to the text menu and platform choices. Happ and
+Telegraph buttons appear only when their HTTPS URL is configured.
 
 The recurring notifier scans logical primary users and sends one current expiry
 milestone (7, 3, 1 or expired) plus the highest newly reached mobile quota
@@ -268,6 +288,55 @@ references keep names and internal identifiers out of callback data.
 The 3x-ui panel and `karina-user` CLI remain maintenance and emergency tools.
 Admin manual extension is independent of billing orders and does not change the
 billing plan prices or order state machine.
+
+## Customer Telegram UX
+
+The private-chat `/start` router sends administrators to the admin menu, healthy
+bound customers to their cabinet, stale bindings to recovery, and new customers
+through the configured channel membership check to the tariff catalog. The
+acquisition path has no administrator dead end: a member can select a tariff and
+create a persistent request immediately.
+
+The canonical tariff catalog is defined once in `src/models/billing.py`: 30 days
+for 199 RUB, 90 days for 499 RUB, 180 days for 899 RUB, and 365 days for 1499
+RUB. Telegram callbacks contain only a tariff code; duration and price are
+resolved again on the server. Until a payment provider is connected, an
+authorized admin confirms or rejects pending requests. Provisioning and renewal
+run through `CustomerOrderService`, the same boundary intended for a future
+verified payment webhook. Approval is recorded only after the bundle operation
+and Telegram binding succeed. Duplicate approval and rejection callbacks are
+idempotent; incomplete provisioning remains pending for reconciliation.
+
+Customer presentation lives in `src/ui/`. The cabinet exposes connection,
+renewal, device count/reset, installation help, sharing, news, and support while
+hiding UUIDs, subscription IDs, raw HWIDs, inbound identifiers, and the internal
+mobile credential. Connection and QR actions use the existing authoritative
+issuer and never rotate credentials.
+
+Optional customer configuration keys are:
+
+```text
+MENU_ANIMATION_FILE_ID=
+CONNECT_VIDEO_FILE_ID=
+NEWS_CHANNEL_URL=
+SUPPORT_URL=
+HAPP_ANDROID_URL=
+HAPP_IOS_URL=
+HAPP_WINDOWS_URL=
+HAPP_MACOS_URL=
+TELEGRAPH_ANDROID_URL=
+TELEGRAPH_IOS_URL=
+TELEGRAPH_WINDOWS_URL=
+TELEGRAPH_MACOS_URL=
+```
+
+URLs must use HTTPS. Missing media or help URLs simply hide the corresponding
+button. Upload each animation/video once in a private operator chat, inspect the
+received Telegram update using an operator-controlled diagnostic tool, and copy
+only its `file_id` into configuration. Never paste or print the bot token while
+obtaining a file ID. Deployment installs code and services only; it does not
+upload media, create orders, provision customers, or regenerate connection
+artifacts.
 
 ## Backup
 

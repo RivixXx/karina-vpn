@@ -1,4 +1,5 @@
 from .client_service import ClientService
+from .customer_order_service import CustomerOrderError, CustomerOrderService
 from .billing_service import (
     BillingAccessError, BillingError, BillingService, BillingStateError,
     OrderNotFoundError, UnknownPlanError,
@@ -17,5 +18,5 @@ __all__ = [
     "ClientAlreadyExistsError", "ValidationError", "SubscriptionIssueError",
     "BillingService", "BillingError", "BillingStateError", "BillingAccessError",
     "OrderNotFoundError", "UnknownPlanError",
-    "ReconciliationRequiredError",
+    "ReconciliationRequiredError", "CustomerOrderError", "CustomerOrderService",
 ]

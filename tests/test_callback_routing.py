@@ -42,6 +42,7 @@ def bot(source_functions, local_db):
         "admin_bundle_user", "format_bundle_profile", "bytes_to_human",
         "membership_required", "check_required_membership", "membership_keyboard",
         "render_membership_gate", "render_membership_error", "format_user_cabinet",
+        "render_tariffs", "send_menu_animation",
     }
 
     def connect():
@@ -77,6 +78,9 @@ def bot(source_functions, local_db):
         REQUIRED_MEMBERSHIP_MODE="new_users", REQUIRED_TG_CHAT_ID=-100123,
         REQUIRED_TG_CHAT_URL="https://t.me/fixture_group",
         MembershipCheckError=type("MembershipCheckError", (Exception,), {}),
+        CUSTOMER_CONFIG=NS(menu_animation_file_id=None),
+        tariff_list_view=lambda **kwargs: ("tariffs", []),
+        connection_view=lambda page: ("connection", []),
     )
     functions["_service"] = service
     return functions
@@ -195,13 +199,21 @@ def test_stale_service_client_is_safe(bot):
     assert "больше не существует" in upd.callback_query.edit_message_text.call_args.args[0]
 
 
-@pytest.mark.parametrize("chat", ["group", "supergroup", "channel"])
+@pytest.mark.parametrize("chat", ["group", "supergroup"])
 def test_group_start_and_callback_reveal_nothing(bot, chat):
     upd = invoke(bot, "uy:1", chat=chat)
     assert not upd.callback_query.edit_message_text.called
     run(bot["start"](upd, NS(args=["bind_synthetic"])))
     assert "личном чате" in upd.message.reply_text.call_args.args[0]
     bot["_service"].get_client.assert_not_called()
+
+
+def test_channel_update_is_ignored(bot):
+    upd = invoke(bot, "uy:1", chat="channel")
+    run(bot["start"](upd, NS(args=["bind_synthetic"])))
+    assert not upd.callback_query.answer.called
+    assert not upd.callback_query.edit_message_text.called
+    assert not upd.message.reply_text.called
 
 
 def test_non_admin_cannot_delete(bot, local_db):
@@ -278,7 +290,7 @@ def test_unbound_member_continues_existing_onboarding(bot):
     api = NS(get_chat_member=AsyncMock(return_value=NS(status="member")))
     upd = update("unused", user=44)
     run(bot["start"](upd, NS(args=[], bot=api)))
-    assert "нет привязанной подписки" in upd.message.reply_text.call_args.args[0]
+    assert upd.message.reply_text.call_args.args[0] == "tariffs"
 
 
 def test_all_users_mode_rechecks_linked_user(bot):

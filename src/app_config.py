@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 class ConfigError(Exception):
@@ -23,6 +24,27 @@ class KarinaConfig:
     required_tg_chat_id: int | None = None
     required_tg_chat_url: str | None = None
     required_membership_mode: str = "new_users"
+    menu_animation_file_id: str | None = None
+    connect_video_file_id: str | None = None
+    news_channel_url: str | None = None
+    support_url: str | None = None
+    telegraph_android_url: str | None = None
+    telegraph_ios_url: str | None = None
+    telegraph_windows_url: str | None = None
+    telegraph_macos_url: str | None = None
+    happ_android_url: str | None = None
+    happ_ios_url: str | None = None
+    happ_windows_url: str | None = None
+    happ_macos_url: str | None = None
+
+
+def _optional_https_url(values, key):
+    value = values.get(key, "").strip() or None
+    if value:
+        parsed = urlparse(value)
+        if parsed.scheme != "https" or not parsed.netloc:
+            raise ConfigError(f"invalid {key}: HTTPS URL required")
+    return value
 
 
 def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig:
@@ -109,4 +131,16 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         required_tg_chat_id=required_tg_chat_id,
         required_tg_chat_url=required_tg_chat_url,
         required_membership_mode=membership_mode,
+        menu_animation_file_id=values.get("MENU_ANIMATION_FILE_ID", "").strip() or None,
+        connect_video_file_id=values.get("CONNECT_VIDEO_FILE_ID", "").strip() or None,
+        news_channel_url=_optional_https_url(values, "NEWS_CHANNEL_URL"),
+        support_url=_optional_https_url(values, "SUPPORT_URL"),
+        telegraph_android_url=_optional_https_url(values, "TELEGRAPH_ANDROID_URL"),
+        telegraph_ios_url=_optional_https_url(values, "TELEGRAPH_IOS_URL"),
+        telegraph_windows_url=_optional_https_url(values, "TELEGRAPH_WINDOWS_URL"),
+        telegraph_macos_url=_optional_https_url(values, "TELEGRAPH_MACOS_URL"),
+        happ_android_url=_optional_https_url(values, "HAPP_ANDROID_URL"),
+        happ_ios_url=_optional_https_url(values, "HAPP_IOS_URL"),
+        happ_windows_url=_optional_https_url(values, "HAPP_WINDOWS_URL"),
+        happ_macos_url=_optional_https_url(values, "HAPP_MACOS_URL"),
     )

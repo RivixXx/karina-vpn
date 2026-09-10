@@ -39,7 +39,7 @@ class BillingService:
     def list_plans(self):
         return [plan for plan in self.plans.values() if plan.enabled]
 
-    def create_order(self, tg_id, email, plan_id):
+    def create_order(self, tg_id, email, plan_id, *, kind="renewal"):
         plan = self.plans.get(plan_id)
         if plan is None or not plan.enabled:
             raise UnknownPlanError("Неизвестный тариф")
@@ -48,6 +48,7 @@ class BillingService:
             plan_id=plan.id, days=plan.days, amount_rub=plan.price_rub,
             status=OrderStatus.PENDING, provider=None, provider_payment_id=None,
             created_at=self.now_provider(), paid_at=None, applied_at=None,
+            kind=kind,
         )
         return self.repository.create_order(order, plan.title)
 
