@@ -62,7 +62,9 @@ class FakeXUI:
 
     def update_client(self, email, payload):
         used = self.clients[email].get("usedTraffic", 0)
-        self.clients[email] = deepcopy(payload)
+        inbound_ids = list(payload.get("inboundIds", self.clients[email]["inboundIds"]))
+        client = {key: value for key, value in payload.items() if key != "inboundIds"}
+        self.clients[email] = {"client": deepcopy(client), "inboundIds": inbound_ids}
         self.clients[email]["usedTraffic"] = used
         self.updated.append((email, deepcopy(payload)))
 
@@ -213,6 +215,33 @@ def test_set_traffic(config, tmp_path):
     assert xui.clients["demo"]["client"]["totalGB"] == int(2.5 * 1024 ** 3)
 
 
+@pytest.mark.parametrize("operation", ["extend", "enable", "disable", "hwid", "traffic"])
+def test_update_operations_send_full_flat_writable_client(config, tmp_path, operation):
+    record = raw_client()
+    record["client"].update({
+        "id": 42, "uuid": "fixture-uuid", "allowedIPs": "10.0.0.2/32",
+        "reverse": {"tag": "fixture"}, "serverManaged": "drop-me",
+    })
+    service, xui = make_service(config, tmp_path, {"demo": record})
+    if operation == "extend":
+        service.extend_client("demo", 1)
+    elif operation == "enable":
+        service.enable_client("demo")
+    elif operation == "disable":
+        service.disable_client("demo")
+    elif operation == "hwid":
+        service.set_hwid_limit("demo", 4)
+    else:
+        service.set_traffic_limit("demo", 2)
+    _, payload = xui.updated[-1]
+    assert payload["email"] == "demo" and payload["inboundIds"] == [1, 2]
+    assert payload["uuid"] == "fixture-uuid"
+    assert payload["allowedIPs"] == "10.0.0.2/32"
+    assert payload["reverse"] == {"tag": "fixture"}
+    assert "client" not in payload and "id" not in payload
+    assert "serverManaged" not in payload
+
+
 def test_unlimited_traffic(config, tmp_path):
     service, _ = make_service(config, tmp_path, {"demo": raw_client(used=123)})
     result = service.get_traffic("demo")
@@ -343,6 +372,7 @@ def test_create_mobile_bundle(config, tmp_path):
     assert primary.inbound_ids == (2, 3, 4) and primary.total_traffic_bytes == 0
     assert mobile.inbound_ids == (5,)
     assert mobile.total_traffic_bytes == 53687091200
+    assert primary.device_limit == 2 and mobile.device_limit == 0
     assert primary.sub_id != mobile.sub_id
     assert primary.expiry_time_ms == mobile.expiry_time_ms
     link = xui.clients["Mikhail"]["externalLinks"][0]
@@ -361,6 +391,55 @@ def test_migration_detaches_mobile_inbound_last(config, tmp_path):
     result = service.migrate_client_to_mobile_bundle("Mikhail")
     assert result.mobile.inbound_ids == (5,)
     assert xui.detached == [("Mikhail", (5,))]
+
+
+def test_production_mobile_hwid_repair_uses_zero_and_flat_update(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    primary = raw_client("Testrouter", hwid=5, inbounds=(2, 3, 4))
+    mobile = raw_client("Testrouter__mobile", hwid=5, inbounds=(5,),
+                        traffic=53687091200, sub_id="mobile-secret")
+    primary["externalLinks"] = [{
+        "kind": "subscription", "value": config.sub_base + "/mobile-secret",
+        "remark": "karina-mobile",
+    }]
+    service, xui = make_service(
+        config, tmp_path, {"Testrouter": primary, "Testrouter__mobile": mobile},
+    )
+    plan = service.plan_mobile_migration("Testrouter")
+    assert plan.needs_hwid_sync and not plan.already_migrated
+    result = service.migrate_client_to_mobile_bundle("Testrouter")
+    assert result.primary.device_limit == 5 and result.mobile.device_limit == 0
+    email, payload = xui.updated[-1]
+    assert email == "Testrouter__mobile"
+    assert payload["email"] == email and payload["limitHwid"] == 0
+    assert payload["inboundIds"] == [5] and "client" not in payload
+
+
+def test_migration_repairs_mobile_quota_expiry_and_hwid(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_id": 5,
+                                "mobile_traffic_bytes": 53687091200})
+    primary = raw_client("Mikhail", expiry=NOW + 10 * DAY, hwid=5,
+                         inbounds=(2, 3, 4))
+    mobile = raw_client("Mikhail__mobile", expiry=NOW + DAY, hwid=5,
+                        traffic=1, inbounds=(5,), sub_id="mobile-secret")
+    primary["externalLinks"] = [{
+        "kind": "subscription", "value": config.sub_base + "/mobile-secret",
+        "remark": "karina-mobile",
+    }]
+    service, xui = make_service(
+        config, tmp_path, {"Mikhail": primary, "Mikhail__mobile": mobile},
+    )
+    plan = service.plan_mobile_migration("Mikhail")
+    assert plan.needs_mobile_quota_fix and plan.needs_expiry_sync and plan.needs_hwid_sync
+    result = service.migrate_client_to_mobile_bundle("Mikhail")
+    assert result.mobile.total_traffic_bytes == config.mobile_traffic_bytes
+    assert result.mobile.expiry_time_ms == result.primary.expiry_time_ms
+    assert result.mobile.device_limit == 0
+    assert all("client" not in payload and payload["inboundIds"] == [5]
+               for email, payload in xui.updated if email == "Mikhail__mobile")
 
 
 def test_migration_plan_is_read_only_and_redacts_state(config, tmp_path):
@@ -388,7 +467,7 @@ def test_already_migrated_plan_is_noop(config, tmp_path):
                                 "mobile_traffic_bytes": 53687091200})
     primary = raw_client("Mikhail", inbounds=(2, 3, 4))
     mobile = raw_client("Mikhail__mobile", inbounds=(5,), traffic=53687091200,
-                        sub_id="mobile-secret")
+                        hwid=0, sub_id="mobile-secret")
     primary["externalLinks"] = [{"kind": "subscription",
                                   "value": config.sub_base + "/mobile-secret",
                                   "remark": "karina-mobile"}]
@@ -449,7 +528,7 @@ def bundle_clients():
     return {
         "demo": raw_client("demo", expiry=NOW + DAY, hwid=2, inbounds=(1, 2)),
         "demo__mobile": raw_client(
-            "demo__mobile", expiry=NOW + DAY, hwid=2, traffic=50 * 1024 ** 3,
+            "demo__mobile", expiry=NOW + DAY, hwid=0, traffic=50 * 1024 ** 3,
             used=1024 ** 2, sub_id="mobile_id123", inbounds=(5,),
         ),
     }
@@ -473,7 +552,7 @@ def test_bundle_extend_hwid_toggle_and_mobile_traffic(config, tmp_path):
     assert xui.clients["demo__mobile"]["client"]["expiryTime"] == extended.expiry_time_ms
     service.set_hwid_limit("demo", 5)
     assert xui.clients["demo"]["client"]["limitHwid"] == 5
-    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 5
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
     service.disable_client("demo")
     assert not xui.clients["demo"]["client"]["enable"]
     assert not xui.clients["demo__mobile"]["client"]["enable"]
@@ -537,7 +616,10 @@ def test_bundle_delete_partial_failure_requires_reconciliation(config, tmp_path)
 
 @pytest.mark.parametrize("operation", ["hwid", "toggle"])
 def test_bundle_partial_updates_require_reconciliation(config, tmp_path, operation):
-    service, xui = make_service(config, tmp_path, bundle_clients())
+    clients = bundle_clients()
+    if operation == "hwid":
+        clients["demo__mobile"]["client"]["limitHwid"] = 5
+    service, xui = make_service(config, tmp_path, clients)
     original = xui.update_client
 
     def fail_mobile(email, payload):

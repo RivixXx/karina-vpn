@@ -134,14 +134,37 @@ def test_delete_device_endpoint(config):
 def test_mutating_operation_has_csrf_header(config):
     api = client(config, {"success": True})
     api.csrf = "csrf_fixture"
-    api.update_client("demo", {"client": {}})
+    api.update_client("demo", {"email": "demo", "inboundIds": [2, 3]})
     assert api.opener.requests[0][0].get_header("X-csrf-token") == "csrf_fixture"
+
+
+@pytest.mark.parametrize(("inbound_ids", "query"), [
+    ([5], "5"),
+    ([2, 3], "2%2C3"),
+])
+def test_modern_update_contract_is_flat_with_comma_separated_inbound_query(
+        config, inbound_ids, query):
+    api = client(config, {"success": True})
+    api.csrf = "csrf_fixture"
+    api.update_client("Testrouter__mobile", {
+        "email": "Testrouter__mobile", "uuid": "fixture-uuid",
+        "limitHwid": 0, "inboundIds": inbound_ids,
+    })
+    request = api.opener.requests[0][0]
+    assert request.full_url == (
+        config.xui_base
+        + f"/panel/api/clients/update/Testrouter__mobile?inboundIds={query}"
+    )
+    assert json.loads(request.data) == {
+        "email": "Testrouter__mobile", "uuid": "fixture-uuid", "limitHwid": 0,
+    }
+    assert "client" not in json.loads(request.data)
 
 
 @pytest.mark.parametrize(("method_name", "args", "http_method", "path"), [
     ("list_inbounds", (), "GET", "/panel/api/inbounds/list"),
     ("create_client", ({"client": {}},), "POST", "/panel/api/clients/add"),
-    ("update_client", ("name+test", {"client": {}}), "POST",
+    ("update_client", ("name+test", {"email": "name+test"}), "POST",
      "/panel/api/clients/update/name%2Btest"),
     ("delete_client", ("name+test",), "POST", "/panel/api/clients/del/name%2Btest"),
     ("reset_hwids", ("name+test",), "DELETE", "/panel/api/clients/hwids/name%2Btest"),

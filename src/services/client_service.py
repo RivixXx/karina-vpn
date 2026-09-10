@@ -31,6 +31,14 @@ from .errors import (
 
 
 class ClientService:
+    _WRITABLE_CLIENT_FIELDS = frozenset({
+        "email", "subId", "uuid", "password", "auth", "flow", "security",
+        "totalGB", "expiryTime", "limitIp", "limitHwid", "tgId", "group",
+        "comment", "enable", "reset", "resetDay", "resetMax", "trafficReset",
+        "trafficResetDay", "privateKey", "publicKey", "allowedIPs",
+        "preSharedKey", "reverse",
+    })
+
     def __init__(
         self,
         config: KarinaConfig,
@@ -249,7 +257,7 @@ class ClientService:
                 self.config.primary_inbound_ids or self.config.inbound_ids,
             )
             mobile = self._create_credential(
-                mobile_email, expiry, limit, self.config.mobile_traffic_bytes,
+                mobile_email, expiry, 0, self.config.mobile_traffic_bytes,
                 (self.config.mobile_inbound_id,),
             )
             self._ensure_mobile_subscription(email, mobile.sub_id)
@@ -293,7 +301,7 @@ class ClientService:
         mobile = self.get_client(mobile_email)
         if mobile is None:
             mobile = self._create_credential(
-                mobile_email, primary.expiry_time_ms, primary.device_limit,
+                mobile_email, primary.expiry_time_ms, 0,
                 self.config.mobile_traffic_bytes, (self.config.mobile_inbound_id,),
             )
         elif mobile.inbound_ids != (self.config.mobile_inbound_id,):
@@ -302,11 +310,10 @@ class ClientService:
             mobile = self._update(mobile_email, lambda client: client.__setitem__(
                 "totalGB", self.config.mobile_traffic_bytes
             ))
-        if (mobile.expiry_time_ms != primary.expiry_time_ms or
-                mobile.device_limit != primary.device_limit):
+        if mobile.expiry_time_ms != primary.expiry_time_ms or mobile.device_limit != 0:
             def synchronize(client):
                 client["expiryTime"] = primary.expiry_time_ms
-                client["limitHwid"] = primary.device_limit
+                client["limitHwid"] = 0
             mobile = self._update(mobile_email, synchronize)
         self._ensure_mobile_subscription(email, mobile.sub_id)
         if self.config.mobile_inbound_id in primary.inbound_ids:
@@ -358,7 +365,7 @@ class ClientService:
         needs_create = mobile is None
         needs_quota = bool(mobile and mobile.total_traffic_bytes != self.config.mobile_traffic_bytes)
         needs_expiry = bool(mobile and mobile.expiry_time_ms != primary.expiry_time_ms)
-        needs_hwid = bool(mobile and mobile.device_limit != primary.device_limit)
+        needs_hwid = bool(mobile and mobile.device_limit != 0)
         needs_detach = self.config.mobile_inbound_id in primary.inbound_ids
         needs_link = not link_correct
         already = not blocking and not any((needs_create, needs_quota, needs_expiry,
@@ -377,9 +384,13 @@ class ClientService:
         email, obj = self._require_raw(email)
         client = obj["client"]
         mutate(client)
-        self._call(lambda: self.xui.update_client(email, {
-            "client": client, "inboundIds": obj.get("inboundIds", []),
-        }), "ошибка обновления клиента")
+        writable = {
+            key: value for key, value in client.items()
+            if key in self._WRITABLE_CLIENT_FIELDS
+        }
+        writable["inboundIds"] = list(obj.get("inboundIds", []))
+        self._call(lambda: self.xui.update_client(email, writable),
+                   "ошибка обновления клиента")
         return self._to_client_info(obj, len(self._devices_for_summary(email)))
 
     def extend_client(self, email, days) -> ClientInfo:
@@ -432,11 +443,11 @@ class ClientService:
     def set_hwid_limit(self, email, limit) -> ClientInfo:
         limit = self._hwid_limit(limit)
         mobile_email = mobile_email_for(email)
-        mobile_exists = self.get_client(mobile_email) is not None
+        mobile = self.get_client(mobile_email)
         primary = self._update(email, lambda client: client.__setitem__("limitHwid", limit))
-        if mobile_exists:
+        if mobile is not None and mobile.device_limit != 0:
             try:
-                self._update(mobile_email, lambda client: client.__setitem__("limitHwid", limit))
+                self._update(mobile_email, lambda client: client.__setitem__("limitHwid", 0))
             except ClientServiceError as exc:
                 raise ReconciliationRequiredError(
                     "primary HWID updated but mobile synchronization failed"

@@ -96,8 +96,14 @@ class XUIClient:
                                "не удалось создать клиента")
 
     def update_client(self, email, payload):
-        return self._operation(self.request("POST", "/panel/api/clients/update/" +
-                               urllib.parse.quote(email, safe=""), payload, csrf=True),
+        client = dict(payload)
+        inbound_ids = client.pop("inboundIds", ())
+        path = "/panel/api/clients/update/" + urllib.parse.quote(email, safe="")
+        if inbound_ids:
+            path += "?" + urllib.parse.urlencode({
+                "inboundIds": ",".join(str(value) for value in inbound_ids),
+            })
+        return self._operation(self.request("POST", path, client, csrf=True),
                                "не удалось обновить клиента")
 
     def delete_client(self, email):
