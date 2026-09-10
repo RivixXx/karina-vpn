@@ -14,6 +14,8 @@ def write_config(tmp_path, **changes):
         "CONNECT_BASE": "https://connect.example.test/",
         "INBOUND_IDS": "2,3,4,5",
         "DEFAULT_HWID_LIMIT": "2",
+        "REQUIRED_TG_CHAT_ID": "-1003771177505",
+        "REQUIRED_TG_CHAT_URL": "https://t.me/fixture_group",
     }
     values.update(changes)
     path = tmp_path / "config.env"
@@ -97,3 +99,24 @@ def test_missing_file_does_not_disclose_credentials(tmp_path):
     with pytest.raises(ConfigError) as error:
         load_config(tmp_path / "missing.env")
     assert "password" not in str(error.value).lower()
+
+
+def test_membership_config_and_signed_chat_id(tmp_path):
+    config = load_config(write_config(tmp_path, REQUIRED_TG_CHAT_ID="-1003771177505"))
+    assert config.required_tg_chat_id == -1003771177505
+    assert config.required_tg_chat_url == "https://t.me/fixture_group"
+    assert config.required_membership_mode == "new_users"
+
+
+@pytest.mark.parametrize("mode", ["invalid", "NEW_USERS", ""])
+def test_invalid_membership_mode(tmp_path, mode):
+    with pytest.raises(ConfigError, match="REQUIRED_MEMBERSHIP_MODE"):
+        load_config(write_config(tmp_path, REQUIRED_MEMBERSHIP_MODE=mode))
+
+
+def test_disabled_membership_requires_no_chat_configuration(tmp_path):
+    config = load_config(write_config(
+        tmp_path, REQUIRED_MEMBERSHIP_MODE="disabled",
+        REQUIRED_TG_CHAT_ID="", REQUIRED_TG_CHAT_URL="",
+    ))
+    assert config.required_tg_chat_id is None and config.required_tg_chat_url is None

@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 
 try:
-    from .app_config import ConfigError
+    from .app_config import ConfigError, load_config
     from .application import build_client_service
     from .integrations.xui import XUIError
     from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
@@ -33,7 +33,7 @@ try:
         ReconciliationRequiredError, ValidationError,
     )
 except ImportError:  # Direct execution from the src directory.
-    from app_config import ConfigError
+    from app_config import ConfigError, load_config
     from application import build_client_service
     from integrations.xui import XUIError
     from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
@@ -80,6 +80,13 @@ def load_env(path):
 
 BOT_TOKEN = None
 ADMIN_TG_ID = None
+REQUIRED_TG_CHAT_ID = None
+REQUIRED_TG_CHAT_URL = None
+REQUIRED_MEMBERSHIP_MODE = "new_users"
+
+
+class MembershipCheckError(Exception):
+    pass
 
 
 # ============================================================
@@ -462,17 +469,7 @@ def is_admin(update):
 # ============================================================
 
 def client_keyboard(email, url=None):
-    rows = []
-
-    if url:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    "📱 Подключить VPN",
-                    url=url,
-                )
-            ]
-        )
+    rows = [[InlineKeyboardButton("🔗 Подключить VPN", callback_data="client_connect")]]
 
     rows.extend(
         [
@@ -480,10 +477,6 @@ def client_keyboard(email, url=None):
                 InlineKeyboardButton(
                     "📱 Мои устройства",
                     callback_data="client_devices",
-                ),
-                InlineKeyboardButton(
-                    "📊 Трафик",
-                    callback_data="client_traffic",
                 ),
             ],
             [
@@ -504,8 +497,8 @@ def client_keyboard(email, url=None):
             ],
             [
                 InlineKeyboardButton(
-                    "💬 Помощь",
-                    url=SUPPORT_URL,
+                    "❓ Помощь",
+                    callback_data="client_help",
                 ),
                 InlineKeyboardButton(
                     "🔄 Обновить",
@@ -548,23 +541,62 @@ def format_billing_order(order, plan):
     )
 
 
+def format_user_cabinet(bundle, mobile_traffic, traffic_unavailable=False, now_ms=None):
+    primary = bundle.primary
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
+    expired = bool(primary.expiry_time_ms and primary.expiry_time_ms <= now_ms)
+    if expired:
+        status = "🔴 Подписка закончилась"
+        expiry = f"Дата окончания: {primary.expiry_text.split()[0]}"
+    elif not primary.enabled:
+        status, expiry = "⛔ Подписка отключена", ""
+    elif not primary.expiry_time_ms:
+        status, expiry = "🟢 Подписка активна", "Срок: без ограничений"
+    else:
+        status, expiry = "🟢 Подписка активна", f"До: {primary.expiry_text.split()[0]}"
+    lines = ["👤 Карина VPN", "", status]
+    if expiry:
+        lines.append(expiry)
+    lines.extend(["", f"📱 Устройства: {primary.device_count} / {primary.device_limit or '∞'}",
+                  "", "📱 Карина против глушилок"])
+    if bundle.mobile is None:
+        lines.append("Не подключена")
+    elif traffic_unavailable or mobile_traffic is None:
+        lines.append("Данные временно недоступны")
+    else:
+        used = mobile_traffic.used_bytes / 1024 ** 3
+        limit = mobile_traffic.limit_bytes / 1024 ** 3
+        usage = f"Использовано: {used:.1f} / {limit:.0f} ГБ"
+        if mobile_traffic.limit_bytes and mobile_traffic.used_bytes >= mobile_traffic.limit_bytes:
+            usage += " · лимит исчерпан"
+        lines.append(usage)
+    return markdown_v2_escape("\n".join(lines))
+
+
 async def render_client_home(update, email):
     try:
-        client = build_client_service().get_client(email)
+        service = build_client_service()
+        bundle = service.get_client_bundle(email)
     except EXPECTED_SERVICE_ERRORS as exc:
         text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
         )
     else:
-        if client is None:
+        if bundle is None:
             text = "❌ Подписка не найдена\\. Обратитесь в поддержку\\."
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
             )
         else:
-            text = format_client_profile(client)
-            keyboard = client_keyboard(email, client.connect_url)
+            unavailable = False
+            try:
+                mobile_traffic = service.get_mobile_traffic(email)
+            except EXPECTED_SERVICE_ERRORS:
+                LOGGER.warning("Mobile traffic unavailable for cabinet", exc_info=True)
+                mobile_traffic, unavailable = None, True
+            text = format_user_cabinet(bundle, mobile_traffic, unavailable)
+            keyboard = client_keyboard(email)
 
     if update.callback_query:
         await update.callback_query.edit_message_text(
@@ -579,13 +611,13 @@ async def render_client_home(update, email):
 async def client_devices(update, email):
     try:
         service = build_client_service()
-        client = service.get_client(email)
-        if client is None:
+        bundle = service.get_client_bundle(email)
+        if bundle is None:
             text = "❌ Подписка не найдена\\."
         else:
-            text = "📱 *Мои устройства*\n\n" + markdown_v2_escape(format_devices(
-                service.get_devices(email), client.device_limit
-            ))
+            count = len(service.get_bundle_devices(email))
+            text = "📱 *Мои устройства*\n\n" + markdown_v2_escape(
+                f"Подключено: {count} из {bundle.primary.device_limit or '∞'}")
     except EXPECTED_SERVICE_ERRORS as exc:
         text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
 
@@ -599,8 +631,8 @@ async def client_devices(update, email):
             ],
             [
                 InlineKeyboardButton(
-                    "💬 Сменить устройство",
-                    url=SUPPORT_URL,
+                    "Сбросить мои устройства",
+                    callback_data="client_reset_devices",
                 )
             ],
         ]
@@ -1322,6 +1354,54 @@ async def telegram_error_handler(update, context):
         LOGGER.warning("Unable to send safe Telegram error response", exc_info=True)
 
 
+def membership_required(linked):
+    return REQUIRED_MEMBERSHIP_MODE == "all_users" or (
+        REQUIRED_MEMBERSHIP_MODE == "new_users" and not linked
+    )
+
+
+async def check_required_membership(bot, telegram_user_id):
+    if REQUIRED_MEMBERSHIP_MODE == "disabled":
+        return True
+    try:
+        member = await bot.get_chat_member(REQUIRED_TG_CHAT_ID, telegram_user_id)
+    except Exception as exc:
+        LOGGER.warning("Required Telegram membership check failed (%s)",
+                       type(exc).__name__, exc_info=True)
+        raise MembershipCheckError("membership check unavailable") from exc
+    raw_status = getattr(member, "status", "")
+    status = str(getattr(raw_status, "value", raw_status)).lower().rsplit(".", 1)[-1]
+    if status in {"creator", "administrator", "member"}:
+        return True
+    return status == "restricted" and bool(getattr(member, "is_member", False))
+
+
+def membership_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Вступить в группу", url=REQUIRED_TG_CHAT_URL)],
+        [InlineKeyboardButton("✅ Я вступил — проверить", callback_data="membership_check")],
+    ])
+
+
+async def render_membership_gate(update, still_missing=False):
+    text = ("Пока не вижу вас среди участников группы."
+            if still_missing else
+            "👋 Добро пожаловать в Карина VPN\n\nДля использования бота необходимо "
+            "вступить в нашу группу «Karina VPN».")
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=membership_keyboard())
+    else:
+        await update.message.reply_text(text, reply_markup=membership_keyboard())
+
+
+async def render_membership_error(update):
+    text = "Не удалось проверить подписку на группу. Попробуйте немного позже."
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text)
+    else:
+        await update.message.reply_text(text)
+
+
 # ============================================================
 # START
 # ============================================================
@@ -1337,6 +1417,17 @@ async def start(
     user = update.effective_user
 
     args = context.args
+    link = get_link_by_tg(user.id)
+
+    if not is_admin(update) and membership_required(bool(link)):
+        try:
+            member = await check_required_membership(context.bot, user.id)
+        except MembershipCheckError:
+            await render_membership_error(update)
+            return
+        if not member:
+            await render_membership_gate(update)
+            return
 
     # One-time binding.
     if args and args[0].startswith("bind_"):
@@ -1372,10 +1463,6 @@ async def start(
         return
 
     # Client.
-    link = get_link_by_tg(
-        user.id
-    )
-
     if link:
         await render_client_home(
             update,
@@ -1420,6 +1507,20 @@ async def callbacks(
 
     data = query.data
     if not isinstance(data, str):
+        return
+    if data == "membership_check":
+        try:
+            member = await check_required_membership(context.bot, update.effective_user.id)
+        except MembershipCheckError:
+            await render_membership_error(update)
+            return
+        if not member:
+            await render_membership_gate(update, still_missing=True)
+            return
+        await query.edit_message_text(
+            "✅ Участие подтверждено. Для привязки подписки используйте персональную ссылку.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]),
+        )
         return
     if data == "admin_create_help" or data.startswith("ac:"):
         if is_admin(update):
@@ -1529,6 +1630,16 @@ async def callbacks(
 
     email = link["email"]
 
+    if membership_required(True):
+        try:
+            member = await check_required_membership(context.bot, user.id)
+        except MembershipCheckError:
+            await render_membership_error(update)
+            return
+        if not member:
+            await render_membership_gate(update, still_missing=True)
+            return
+
     if data == "client_home":
         await render_client_home(
             update,
@@ -1541,6 +1652,59 @@ async def callbacks(
             update,
             email,
         )
+        return
+
+    if data == "client_connect":
+        try:
+            page = build_client_service().reissue_bundle_connection(email)
+            qr = page[:-5] + ".png" if page.endswith(".html") else None
+            await query.edit_message_text(
+                "Отсканируйте QR-код в Happ или откройте страницу подключения.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔗 Открыть подключение", url=page)],
+                    [InlineKeyboardButton("⬅️ Мой профиль", callback_data="client_home")],
+                ]),
+            )
+            message = getattr(query, "message", None)
+            if qr and message and hasattr(message, "reply_photo"):
+                await message.reply_photo(photo=qr)
+        except EXPECTED_SERVICE_ERRORS as exc:
+            await query.edit_message_text(markdown_v2_escape(safe_user_error(exc)))
+        return
+
+    if data == "client_help":
+        await query.edit_message_text(
+            "Установите Happ, нажмите «Подключить VPN» и импортируйте QR-код. "
+            "В приложении доступны три обычных профиля и «Карина против глушилок».",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)],
+                [InlineKeyboardButton("⬅️ Мой профиль", callback_data="client_home")],
+            ]),
+        )
+        return
+
+    if data == "client_reset_devices":
+        context.user_data["client_device_reset"] = {"tg_id": user.id, "updated_at": time.time()}
+        await query.edit_message_text(
+            "После сброса VPN потребуется повторно подключить на ваших устройствах.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("Сбросить", callback_data="client_reset_confirm")],
+                [InlineKeyboardButton("Отмена", callback_data="client_devices")],
+            ]),
+        )
+        return
+
+    if data == "client_reset_confirm":
+        state = context.user_data.pop("client_device_reset", {})
+        if state.get("tg_id") != user.id or time.time()-state.get("updated_at",0)>ACTION_TIMEOUT_SECONDS:
+            await query.edit_message_text("Подтверждение устарело.")
+            return
+        try:
+            build_client_service().reset_bundle_devices(email)
+            await query.edit_message_text("✅ Устройства сброшены.", reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Мой профиль", callback_data="client_home")]]))
+        except EXPECTED_SERVICE_ERRORS as exc:
+            await query.edit_message_text(markdown_v2_escape(safe_user_error(exc)))
         return
 
     if data == "client_traffic":
@@ -1641,10 +1805,15 @@ async def callbacks(
 # ============================================================
 
 def main():
-    global BOT_TOKEN, ADMIN_TG_ID
+    global BOT_TOKEN, ADMIN_TG_ID, REQUIRED_TG_CHAT_ID, REQUIRED_TG_CHAT_URL
+    global REQUIRED_MEMBERSHIP_MODE
     env = load_env(ENV_FILE)
     BOT_TOKEN = env["BOT_TOKEN"]
     ADMIN_TG_ID = int(env["ADMIN_TG_ID"])
+    config = load_config()
+    REQUIRED_TG_CHAT_ID = config.required_tg_chat_id
+    REQUIRED_TG_CHAT_URL = config.required_tg_chat_url
+    REQUIRED_MEMBERSHIP_MODE = config.required_membership_mode
     init_db()
 
     app = (

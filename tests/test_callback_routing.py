@@ -36,10 +36,12 @@ def bot(source_functions, local_db):
     names = {
         "get_or_create_client_ref", "get_client_email_by_ref", "delete_client_ref",
         "delete_client_local_state", "client_callback", "is_private_chat", "is_admin",
-        "admin_ref_callback", "admin_user", "admin_users", "markdown_v2_escape", "get_link_by_email",
+        "admin_ref_callback", "admin_user", "admin_users", "markdown_v2_escape", "get_link_by_email", "get_link_by_tg",
         "callbacks", "start", "client_keyboard", "status_text", "safe_user_error",
         "format_devices", "format_admin_stats", "format_expiring",
         "admin_bundle_user", "format_bundle_profile", "bytes_to_human",
+        "membership_required", "check_required_membership", "membership_keyboard",
+        "render_membership_gate", "render_membership_error", "format_user_cabinet",
     }
 
     def connect():
@@ -60,6 +62,7 @@ def bot(source_functions, local_db):
         get_expiring=Mock(return_value=[]),
         delete_client=Mock(return_value=client()),
         delete_client_bundle=Mock(return_value=client()),
+        reset_bundle_devices=Mock(),
     )
     functions = source_functions(
         "bot.py", names, db_connect=connect, closing=closing, sqlite3=sqlite3,
@@ -71,6 +74,9 @@ def bot(source_functions, local_db):
         build_client_service=lambda: service, EXPECTED_SERVICE_ERRORS=(RuntimeError,),
         LOGGER=NS(warning=Mock()),
         _markdown_v2_escape=markdown_v2_escape,
+        REQUIRED_MEMBERSHIP_MODE="new_users", REQUIRED_TG_CHAT_ID=-100123,
+        REQUIRED_TG_CHAT_URL="https://t.me/fixture_group",
+        MembershipCheckError=type("MembershipCheckError", (Exception,), {}),
     )
     functions["_service"] = service
     return functions
@@ -243,3 +249,77 @@ def test_bot_source_has_no_cli_or_subprocess_dependency():
     assert "karina_user" not in source
     assert "extract_info" not in source
     assert "parse_user_names" not in source
+
+
+@pytest.mark.parametrize(("status", "is_member", "allowed"), [
+    ("member", None, True), ("administrator", None, True), ("creator", None, True),
+    ("restricted", True, True), ("restricted", False, False),
+    ("left", None, False), ("kicked", None, False), ("banned", None, False),
+])
+def test_membership_authoritative_statuses(bot, status, is_member, allowed):
+    api = NS(get_chat_member=AsyncMock(return_value=NS(status=status, is_member=is_member)))
+    assert run(bot["check_required_membership"](api, 44)) is allowed
+    api.get_chat_member.assert_awaited_once_with(-100123, 44)
+
+
+def test_unbound_start_rechecks_membership_and_uses_configured_url(bot):
+    bot["get_link_by_tg"] = Mock(return_value=None)
+    api = NS(get_chat_member=AsyncMock(return_value=NS(status="left")))
+    upd = update("unused", user=44)
+    run(bot["start"](upd, NS(args=[], bot=api)))
+    api.get_chat_member.assert_awaited_once()
+    keyboard = upd.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+    assert keyboard[0][0].url == "https://t.me/fixture_group"
+    assert keyboard[1][0].callback_data == "membership_check"
+
+
+def test_unbound_member_continues_existing_onboarding(bot):
+    bot["get_link_by_tg"] = Mock(return_value=None)
+    api = NS(get_chat_member=AsyncMock(return_value=NS(status="member")))
+    upd = update("unused", user=44)
+    run(bot["start"](upd, NS(args=[], bot=api)))
+    assert "нет привязанной подписки" in upd.message.reply_text.call_args.args[0]
+
+
+def test_all_users_mode_rechecks_linked_user(bot):
+    bot["REQUIRED_MEMBERSHIP_MODE"] = "all_users"
+    api = NS(get_chat_member=AsyncMock(return_value=NS(status="left")))
+    upd = update("unused", user=2)
+    run(bot["start"](upd, NS(args=[], bot=api)))
+    api.get_chat_member.assert_awaited_once_with(-100123, 2)
+    assert upd.callback_query.edit_message_text.called
+
+
+def test_membership_check_callback_calls_api_again_and_stays_blocked(bot):
+    bot["get_link_by_tg"] = Mock(return_value=None)
+    api = NS(get_chat_member=AsyncMock(return_value=NS(status="left")))
+    invoke(bot, "membership_check", user=44, context=NS(user_data={}, bot=api))
+    invoke(bot, "membership_check", user=44, context=NS(user_data={}, bot=api))
+    assert api.get_chat_member.await_count == 2
+
+
+def test_membership_api_failure_is_infrastructure_error(bot):
+    bot["get_link_by_tg"] = Mock(return_value=None)
+    api = NS(get_chat_member=AsyncMock(side_effect=RuntimeError("invalid chat")))
+    upd = update("unused", user=44)
+    run(bot["start"](upd, NS(args=[], bot=api)))
+    assert "проверить подписку" in upd.callback_query.edit_message_text.call_args.args[0]
+    assert "среди участников" not in upd.callback_query.edit_message_text.call_args.args[0]
+
+
+def test_membership_disabled_and_linked_new_user_policy_bypass(bot):
+    assert bot["membership_required"](True) is False
+    bot["REQUIRED_MEMBERSHIP_MODE"] = "disabled"
+    assert bot["membership_required"](False) is False
+    bot["REQUIRED_MEMBERSHIP_MODE"] = "all_users"
+    assert bot["membership_required"](True) is True
+
+
+def test_client_connect_and_reset_are_bound_to_own_email(bot):
+    context = NS(user_data={})
+    invoke(bot, "client_connect", context=context, user=2)
+    bot["_service"].reissue_bundle_connection.assert_called_once_with("demo_other")
+    invoke(bot, "client_reset_devices", context=context, user=2)
+    bot["_service"].reset_bundle_devices.assert_not_called()
+    invoke(bot, "client_reset_confirm", context=context, user=2)
+    bot["_service"].reset_bundle_devices.assert_called_once_with("demo_other")

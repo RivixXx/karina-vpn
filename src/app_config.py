@@ -20,6 +20,9 @@ class KarinaConfig:
     mobile_traffic_bytes: int = 50 * 1024 ** 3
     connect_dir: Path = Path("/var/www/karina/connect")
     notifier_timezone: str = "Europe/Moscow"
+    required_tg_chat_id: int | None = None
+    required_tg_chat_url: str | None = None
+    required_membership_mode: str = "new_users"
 
 
 def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig:
@@ -76,6 +79,19 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         raise ConfigError("invalid MOBILE_INBOUND_ID")
     if mobile_traffic_gb <= 0:
         raise ConfigError("invalid MOBILE_TRAFFIC_GB")
+    membership_mode = values.get("REQUIRED_MEMBERSHIP_MODE", "new_users")
+    if membership_mode not in {"new_users", "all_users", "disabled"}:
+        raise ConfigError("invalid REQUIRED_MEMBERSHIP_MODE")
+    chat_id_text = values.get("REQUIRED_TG_CHAT_ID", "").strip()
+    try:
+        required_tg_chat_id = int(chat_id_text) if chat_id_text else None
+    except ValueError as exc:
+        raise ConfigError("invalid REQUIRED_TG_CHAT_ID") from exc
+    required_tg_chat_url = values.get("REQUIRED_TG_CHAT_URL", "").strip() or None
+    if membership_mode != "disabled" and (
+            required_tg_chat_id is None or not required_tg_chat_url
+            or not required_tg_chat_url.startswith("https://")):
+        raise ConfigError("membership requires REQUIRED_TG_CHAT_ID and HTTPS REQUIRED_TG_CHAT_URL")
 
     return KarinaConfig(
         xui_base=values["XUI_BASE"].rstrip("/"),
@@ -90,4 +106,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         mobile_traffic_bytes=mobile_traffic_gb * 1024 ** 3,
         connect_dir=Path(values.get("CONNECT_DIR", "/var/www/karina/connect")),
         notifier_timezone=values.get("NOTIFIER_TIMEZONE", "Europe/Moscow"),
+        required_tg_chat_id=required_tg_chat_id,
+        required_tg_chat_url=required_tg_chat_url,
+        required_membership_mode=membership_mode,
     )

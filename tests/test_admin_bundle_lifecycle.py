@@ -95,6 +95,7 @@ def admin(monkeypatch):
         reset_bundle_devices=Mock(), remove_bundle_device=Mock(),
         delete_client_bundle=Mock(),
         get_devices=Mock(return_value=[]),
+        get_bundle_devices=Mock(return_value=[]),
         get_traffic=Mock(return_value=TrafficInfo(0, 0, None, None)),
         list_clients=Mock(return_value=[primary]), get_expiring=Mock(return_value=[]),
         connect_dir=NS(is_dir=lambda: True, exists=lambda: True),
@@ -409,6 +410,15 @@ def test_application_error_handler_logs_and_replies_without_parse_mode(monkeypat
     reply = message.reply_text.call_args
     assert "technical secret" not in reply.args[0]
     assert "parse_mode" not in reply.kwargs
+
+
+def test_user_cabinet_traffic_failure_uses_safe_fallback(admin):
+    admin.get_mobile_traffic.side_effect = ClientServiceError("synthetic")
+    upd = update("client_home")
+    run(bot.render_client_home(upd, "demo"))
+    call = upd.callback_query.edit_message_text.call_args
+    assert "Данные временно недоступны" in call.args[0]
+    assert "demo__mobile" not in call.args[0]
 
 
 def test_admin_service_screen_is_read_only_and_does_not_require_client_link(admin, monkeypatch):

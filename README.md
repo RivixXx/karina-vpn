@@ -147,6 +147,9 @@ MOBILE_INBOUND_ID=5
 MOBILE_TRAFFIC_GB=50
 CONNECT_DIR=/var/www/karina/connect
 NOTIFIER_TIMEZONE=Europe/Moscow
+REQUIRED_TG_CHAT_ID=-1000000000000
+REQUIRED_TG_CHAT_URL=https://t.me/your_group
+REQUIRED_MEMBERSHIP_MODE=new_users
 ```
 
 `INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
@@ -170,6 +173,16 @@ python -m src.notifier --dry-run --user SomeUser
 Internal `__mobile` credentials cannot be targeted directly. A non-blocking
 process lock prevents overlapping scheduled scans; persistent event keys remain
 the correctness guard across restarts and reboots.
+
+`REQUIRED_MEMBERSHIP_MODE` accepts `new_users`, `all_users`, or `disabled`.
+The default policy checks new and unbound users while preserving cabinet access
+for existing linked users. The bot should be an administrator of the configured
+group so Telegram can answer authoritative `getChatMember` checks. Validate the
+operator-supplied signed Bot API chat ID without printing the bot token:
+
+```bash
+python -m src.bot_diagnostics membership-chat
+```
 
 ### First Git Deployment
 
