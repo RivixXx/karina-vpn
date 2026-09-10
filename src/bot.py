@@ -584,7 +584,9 @@ async def render_client_home(update, email):
         )
     else:
         if bundle is None:
-            text = "❌ Подписка не найдена\\. Обратитесь в поддержку\\."
+            LOGGER.warning("Stale Telegram binding points to missing VPN client")
+            text = ("⚠️ Привязка Telegram найдена, но подписка временно недоступна\\. "
+                    "Обратитесь в поддержку для восстановления доступа\\.")
             keyboard = InlineKeyboardMarkup(
                 [[InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)]]
             )
@@ -1217,9 +1219,14 @@ async def admin_create_callback(update, context, data):
 
 
 async def admin_create_text(update, context):
-    state = context.user_data.get("admin_create")
-    if not is_private_chat(update) or not is_admin(update) or not _create_state_valid(update, state):
-        context.user_data.pop("admin_create", None)
+    user_data = context.user_data or {}
+    if not is_private_chat(update) or not is_admin(update):
+        return
+    state = user_data.get("admin_create")
+    if not state:
+        return
+    if not _create_state_valid(update, state):
+        user_data.pop("admin_create", None)
         return
     if state.get("step") != "username":
         return
@@ -1378,8 +1385,8 @@ async def check_required_membership(bot, telegram_user_id):
 
 def membership_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Вступить в группу", url=REQUIRED_TG_CHAT_URL)],
-        [InlineKeyboardButton("✅ Я вступил — проверить", callback_data="membership_check")],
+        [InlineKeyboardButton("Подписаться на канал", url=REQUIRED_TG_CHAT_URL)],
+        [InlineKeyboardButton("✅ Я подписался — проверить", callback_data="membership_check")],
     ])
 
 
@@ -1387,7 +1394,7 @@ async def render_membership_gate(update, still_missing=False):
     text = ("Пока не вижу вас среди участников группы."
             if still_missing else
             "👋 Добро пожаловать в Карина VPN\n\nДля использования бота необходимо "
-            "вступить в нашу группу «Karina VPN».")
+            "подписаться на канал «Karina VPN».")
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=membership_keyboard())
     else:
@@ -1831,7 +1838,11 @@ def main():
     )
 
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, admin_create_text)
+        MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(user_id=ADMIN_TG_ID)
+            & filters.TEXT & ~filters.COMMAND,
+            admin_create_text,
+        )
     )
 
     app.add_handler(

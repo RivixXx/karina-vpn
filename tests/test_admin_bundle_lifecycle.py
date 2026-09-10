@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 from types import ModuleType, SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
@@ -419,6 +420,32 @@ def test_user_cabinet_traffic_failure_uses_safe_fallback(admin):
     call = upd.callback_query.edit_message_text.call_args
     assert "Данные временно недоступны" in call.args[0]
     assert "demo__mobile" not in call.args[0]
+
+
+def test_admin_create_text_ignores_non_admin_missing_and_none_state(admin):
+    admin.validate_email.reset_mock()
+    run(bot.admin_create_text(update(text="ordinary", user=2), NS(user_data=None)))
+    run(bot.admin_create_text(update(text="ordinary", user=1), NS(user_data=None)))
+    run(bot.admin_create_text(update(text="ordinary", user=1), NS(user_data={})))
+    admin.validate_email.assert_not_called()
+
+
+def test_stale_telegram_link_has_controlled_recovery_path(admin):
+    admin.get_client_bundle.return_value = None
+    upd = update("client_home")
+    run(bot.render_client_home(upd, "stale_user"))
+    text = upd.callback_query.edit_message_text.call_args.args[0]
+    assert "Привязка Telegram найдена" in text
+    assert "восстановления доступа" in text
+    assert "Подписка не найдена" not in text
+
+
+def test_admin_text_handler_has_explicit_dispatch_filter():
+    source = Path("src/bot.py").read_text(encoding="utf-8")
+    registration = source[source.index("MessageHandler("):source.index("CallbackQueryHandler(")]
+    assert "filters.ChatType.PRIVATE" in registration
+    assert "filters.User(user_id=ADMIN_TG_ID)" in registration
+    assert "~filters.COMMAND" in registration
 
 
 def test_admin_service_screen_is_read_only_and_does_not_require_client_link(admin, monkeypatch):
