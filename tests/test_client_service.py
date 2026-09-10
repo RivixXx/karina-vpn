@@ -236,10 +236,67 @@ def test_update_operations_send_full_flat_writable_client(config, tmp_path, oper
     _, payload = xui.updated[-1]
     assert payload["email"] == "demo" and payload["inboundIds"] == [1, 2]
     assert payload["uuid"] == "fixture-uuid"
-    assert payload["allowedIPs"] == "10.0.0.2/32"
+    assert payload["allowedIPs"] == ["10.0.0.2/32"]
     assert payload["reverse"] == {"tag": "fixture"}
     assert "client" not in payload and "id" not in payload
     assert "serverManaged" not in payload
+
+
+@pytest.mark.parametrize(("raw", "expected"), [
+    (None, []),
+    ("", []),
+    ([], []),
+    (["1.2.3.4/32"], ["1.2.3.4/32"]),
+    ('["1.2.3.4/32"]', ["1.2.3.4/32"]),
+    ("1.2.3.4/32, 10.0.0.2/32", ["1.2.3.4/32", "10.0.0.2/32"]),
+])
+def test_allowed_ips_update_normalization(config, tmp_path, raw, expected):
+    record = raw_client()
+    record["client"]["allowedIPs"] = raw
+    service, xui = make_service(config, tmp_path, {"demo": record})
+    service.set_traffic_limit("demo", 1)
+    assert xui.updated[-1][1]["allowedIPs"] == expected
+
+
+@pytest.mark.parametrize("raw", ["[broken", '["valid", 3]', {"address": "1.2.3.4/32"}])
+def test_malformed_allowed_ips_aborts_update(config, tmp_path, raw):
+    record = raw_client()
+    record["client"]["allowedIPs"] = raw
+    service, xui = make_service(config, tmp_path, {"demo": record})
+    with pytest.raises(ClientServiceError, match="allowedIPs"):
+        service.set_traffic_limit("demo", 1)
+    assert not xui.updated
+
+
+def test_exact_production_empty_allowed_ips_becomes_list(config, tmp_path):
+    record = raw_client("Testrouter__mobile", hwid=5, inbounds=(5,))
+    record["client"]["allowedIPs"] = ""
+    service, xui = make_service(config, tmp_path, {"Testrouter__mobile": record})
+    service._update("Testrouter__mobile", lambda client: client.__setitem__("limitHwid", 0))
+    payload = xui.updated[-1][1]
+    assert payload["email"] == "Testrouter__mobile"
+    assert payload["allowedIPs"] == [] and payload["limitHwid"] == 0
+
+
+def test_update_normalizes_audited_scalar_and_reverse_types(config, tmp_path):
+    record = raw_client()
+    record["client"].update({
+        "uuid": "fixture-uuid", "tgId": "17", "group": None,
+        "reset": "1", "resetDay": "2", "resetMax": "3",
+        "trafficReset": "monthly", "trafficResetDay": "4",
+        "limitIp": "5", "limitHwid": "6", "totalGB": "7",
+        "expiryTime": "8", "enable": "true", "reverse": '{"tag":"edge"}',
+    })
+    service, xui = make_service(config, tmp_path, {"demo": record})
+    service.set_traffic_limit("demo", 1)
+    payload = xui.updated[-1][1]
+    assert payload["uuid"] == "fixture-uuid" and payload["tgId"] == 17
+    assert payload["group"] == "" and payload["enable"] is True
+    assert payload["reverse"] == {"tag": "edge"}
+    assert all(isinstance(payload[key], int) for key in (
+        "reset", "resetDay", "resetMax", "trafficResetDay", "limitIp",
+        "limitHwid", "totalGB", "expiryTime",
+    ))
 
 
 def test_unlimited_traffic(config, tmp_path):

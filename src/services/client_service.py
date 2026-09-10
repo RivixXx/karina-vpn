@@ -1,3 +1,4 @@
+import json
 import math
 import re
 import secrets
@@ -37,6 +38,15 @@ class ClientService:
         "comment", "enable", "reset", "resetDay", "resetMax", "trafficReset",
         "trafficResetDay", "privateKey", "publicKey", "allowedIPs",
         "preSharedKey", "reverse",
+    })
+    _INTEGER_CLIENT_FIELDS = frozenset({
+        "totalGB", "expiryTime", "limitIp", "limitHwid", "tgId", "reset",
+        "resetDay", "resetMax", "trafficResetDay",
+    })
+    _STRING_CLIENT_FIELDS = frozenset({
+        "email", "subId", "uuid", "password", "auth", "flow", "security",
+        "group", "comment", "trafficReset", "privateKey", "publicKey",
+        "preSharedKey",
     })
 
     def __init__(
@@ -384,14 +394,100 @@ class ClientService:
         email, obj = self._require_raw(email)
         client = obj["client"]
         mutate(client)
-        writable = {
-            key: value for key, value in client.items()
-            if key in self._WRITABLE_CLIENT_FIELDS
-        }
+        writable = self._normalize_client_for_update(client)
         writable["inboundIds"] = list(obj.get("inboundIds", []))
         self._call(lambda: self.xui.update_client(email, writable),
                    "ошибка обновления клиента")
         return self._to_client_info(obj, len(self._devices_for_summary(email)))
+
+    @staticmethod
+    def _normalize_allowed_ips(value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            if not all(isinstance(item, str) for item in value):
+                raise ClientServiceError("invalid allowedIPs value from 3x-ui")
+            return list(value)
+        if not isinstance(value, str):
+            raise ClientServiceError("invalid allowedIPs value from 3x-ui")
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            try:
+                decoded = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ClientServiceError("invalid allowedIPs value from 3x-ui") from exc
+            if not isinstance(decoded, list) or not all(
+                    isinstance(item, str) for item in decoded):
+                raise ClientServiceError("invalid allowedIPs value from 3x-ui")
+            return decoded
+        return [item.strip() for item in text.split(",") if item.strip()]
+
+    @staticmethod
+    def _normalize_reverse(value):
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ClientServiceError("invalid reverse value from 3x-ui") from exc
+        if not isinstance(value, dict):
+            raise ClientServiceError("invalid reverse value from 3x-ui")
+        tag = value.get("tag")
+        if tag is None or tag == "":
+            return None
+        if not isinstance(tag, str):
+            raise ClientServiceError("invalid reverse value from 3x-ui")
+        return {"tag": tag}
+
+    @staticmethod
+    def _normalize_enable(value):
+        if isinstance(value, bool):
+            return value
+        if value in (1, "1", "true", "True"):
+            return True
+        if value in (0, "0", "false", "False", ""):
+            return False
+        raise ClientServiceError("invalid enable value from 3x-ui")
+
+    @staticmethod
+    def _normalize_integer(key, value):
+        if isinstance(value, bool):
+            raise ClientServiceError(f"invalid {key} value from 3x-ui")
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            try:
+                return int(value or 0)
+            except ValueError as exc:
+                raise ClientServiceError(f"invalid {key} value from 3x-ui") from exc
+        raise ClientServiceError(f"invalid {key} value from 3x-ui")
+
+    @classmethod
+    def _normalize_client_for_update(cls, raw_client):
+        if not isinstance(raw_client, dict):
+            raise ClientServiceError("invalid client value from 3x-ui")
+        result = {}
+        for key in cls._WRITABLE_CLIENT_FIELDS:
+            if key not in raw_client:
+                continue
+            value = raw_client[key]
+            if key == "allowedIPs":
+                value = cls._normalize_allowed_ips(value)
+            elif key == "reverse":
+                value = cls._normalize_reverse(value)
+            elif key == "enable":
+                value = cls._normalize_enable(value)
+            elif key in cls._INTEGER_CLIENT_FIELDS:
+                value = cls._normalize_integer(key, value)
+            elif key in cls._STRING_CLIENT_FIELDS:
+                value = "" if value is None else str(value)
+            result[key] = value
+        if not result.get("email"):
+            raise ClientServiceError("client email is required")
+        return result
 
     def extend_client(self, email, days) -> ClientInfo:
         days = self._positive_days(days)
