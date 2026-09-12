@@ -38,7 +38,7 @@ try:
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
     from .telegram_navigation import show_compound, show_photo, show_text, show_video
-    from .avatar_scheduler import TIMEZONE as MOSCOW_TIMEZONE, post_init as avatar_post_init
+    from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
     from application import build_client_service
@@ -55,7 +55,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
     from telegram_navigation import show_compound, show_photo, show_text, show_video
-    from avatar_scheduler import TIMEZONE as MOSCOW_TIMEZONE, post_init as avatar_post_init
+    from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -2107,7 +2107,7 @@ def main():
         Application
         .builder()
         .token(BOT_TOKEN)
-        .post_init(avatar_post_init)
+        .application_class(AvatarApplication)
         .build()
     )
     app.bot_data["config"] = config

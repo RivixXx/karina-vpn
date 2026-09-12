@@ -1,10 +1,13 @@
 import json
 import logging
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, time as clock, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from telegram.ext import Application
 
 
 LOGGER = logging.getLogger(__name__)
@@ -29,6 +32,7 @@ FILENAMES = {
     "cosmonautics_day": "cosmonautics_day.png", "halloween_day": "halloween_day.png",
     "TG_day": "TG_day.png",
 }
+SCHEDULER_TASK_KEY = "karina_avatar_scheduler_task"
 
 
 @dataclass(frozen=True)
@@ -134,11 +138,8 @@ async def apply_avatar(bot, config, *, day=None):
     return selection
 
 
-async def avatar_job(context):
-    await apply_avatar(context.bot, context.application.bot_data["config"])
-
-
 async def scheduler_loop(application):
+    await apply_avatar(application.bot, application.bot_data["config"])
     while True:
         now = datetime.now(TIMEZONE)
         next_run = datetime.combine(now.date(), clock(0, 5), TIMEZONE)
@@ -148,6 +149,30 @@ async def scheduler_loop(application):
         await apply_avatar(application.bot, application.bot_data["config"])
 
 
-async def post_init(application):
-    await apply_avatar(application.bot, application.bot_data["config"])
-    application.create_task(scheduler_loop(application), name="karina-avatar-scheduler")
+def start_scheduler(application):
+    if not application.running:
+        raise RuntimeError("avatar scheduler requires a running PTB Application")
+    task = application.create_task(
+        scheduler_loop(application), name="karina-avatar-scheduler",
+    )
+    application.bot_data[SCHEDULER_TASK_KEY] = task
+    return task
+
+
+async def stop_scheduler(application):
+    task = application.bot_data.pop(SCHEDULER_TASK_KEY, None)
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+class AvatarApplication(Application):
+    async def start(self):
+        await super().start()
+        start_scheduler(self)
+
+    async def stop(self):
+        await stop_scheduler(self)
+        await super().stop()

@@ -1,10 +1,13 @@
 from datetime import date
 from types import SimpleNamespace as NS
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from src.avatar_scheduler import _set_bot_photo, apply_avatar, desired_key, select_avatar
+from src.avatar_scheduler import (
+    SCHEDULER_TASK_KEY, AvatarApplication, _set_bot_photo, apply_avatar,
+    desired_key, select_avatar, start_scheduler, stop_scheduler,
+)
 
 
 def run(coroutine):
@@ -72,3 +75,41 @@ def test_repeated_run_is_idempotent_and_failures_are_isolated(tmp_path):
     bot.set_chat_photo = AsyncMock(side_effect=RuntimeError("insufficient rights"))
     with patch("src.avatar_scheduler._set_bot_photo", AsyncMock(side_effect=RuntimeError("api"))):
         assert run(apply_avatar(bot, config, day=date(2026, 9, 12))).key == "autumn"
+
+
+def test_scheduler_is_never_created_before_application_is_running():
+    application = NS(running=False, create_task=Mock(), bot_data={})
+    with pytest.raises(RuntimeError, match="running PTB Application"):
+        start_scheduler(application)
+    application.create_task.assert_not_called()
+
+
+def test_scheduler_task_is_registered_and_cancelled_during_shutdown():
+    class Task:
+        cancelled = False
+        def cancel(self):
+            self.cancelled = True
+        def __await__(self):
+            if False:
+                yield
+            return None
+
+    task = Task()
+    def create_task(coroutine, **kwargs):
+        coroutine.close()
+        assert kwargs["name"] == "karina-avatar-scheduler"
+        return task
+    application = NS(running=True, create_task=create_task, bot_data={})
+    assert start_scheduler(application) is task
+    assert application.bot_data[SCHEDULER_TASK_KEY] is task
+    run(stop_scheduler(application))
+    assert task.cancelled is True
+    assert SCHEDULER_TASK_KEY not in application.bot_data
+
+
+def test_application_lifecycle_starts_after_super_and_stops_before_super():
+    import inspect
+    start_source = inspect.getsource(AvatarApplication.start)
+    stop_source = inspect.getsource(AvatarApplication.stop)
+    assert start_source.index("await super().start()") < start_source.index("start_scheduler(self)")
+    assert stop_source.index("await stop_scheduler(self)") < stop_source.index("await super().stop()")
