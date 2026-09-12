@@ -48,7 +48,8 @@ def test_shell_scripts_have_shebang_executable_git_mode_and_valid_syntax():
     else:
         executable = shutil.which("bash")
         assert executable
-    run_local([executable, "-n", *[path.relative_to(ROOT).as_posix() for path in scripts]])
+    for path in scripts:
+        run_local([executable, "-n", path.relative_to(ROOT).as_posix()])
 
 
 def test_runtime_requirements_are_minimal_and_exclude_pytest():

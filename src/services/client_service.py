@@ -282,7 +282,7 @@ class ClientService:
             and len(managed) == 1 and managed[0].value == expected_url
         )
 
-    def create_client_bundle(self, email, days=30, hwid_limit=None):
+    def create_client_bundle(self, email, days=30, hwid_limit=None, *, target_expiry_ms=None):
         email = self.validate_email(email)
         try:
             mobile_email = mobile_email_for(email)
@@ -291,12 +291,17 @@ class ClientService:
         if days is not None:
             days = self._positive_days(days)
         limit = self.config.default_hwid_limit if hwid_limit is None else self._hwid_limit(hwid_limit)
+        if target_expiry_ms is not None and (type(target_expiry_ms) is not int or target_expiry_ms <= 0):
+            raise ValidationError("expiry must be a positive timestamp")
         _, primary_obj = self._raw_client(email)
         _, mobile_obj = self._raw_client(mobile_email)
         if primary_obj or mobile_obj:
             if (primary_obj and mobile_obj
                     and self._existing_bundle_is_complete(primary_obj, mobile_obj, limit, days)):
                 primary, mobile = self._to_client_info(primary_obj), self._to_client_info(mobile_obj)
+                if target_expiry_ms is not None and (
+                        primary.expiry_time_ms != target_expiry_ms or mobile.expiry_time_ms != target_expiry_ms):
+                    raise ReconciliationRequiredError("existing bundle does not match payment operation")
                 try:
                     page = self.issue_subscription(primary.sub_id) if self.issue_subscription else None
                     if not page:
@@ -309,7 +314,8 @@ class ClientService:
             if primary_obj and mobile_obj:
                 raise ReconciliationRequiredError("existing client bundle is inconsistent")
             raise ClientAlreadyExistsError(f"client {email} already exists")
-        expiry = 0 if days is None else self.now_provider() + days * 86400000
+        expiry = target_expiry_ms if target_expiry_ms is not None else (
+            0 if days is None else self.now_provider() + days * 86400000)
         primary = mobile = None
         try:
             primary = self._create_credential(

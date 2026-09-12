@@ -23,9 +23,10 @@ def order(order_id="KV-ONE", tg_id=10):
 def test_create_get_and_list_orders(tmp_path):
     repo = repository(tmp_path)
     created = repo.create_order(order(), "Synthetic")
+    repo.cancel_order(created.id)
     repo.create_order(order("KV-TWO"), "Synthetic")
     repo.create_order(order("KV-OTHER", 20), "Synthetic")
-    assert created == repo.get_order("KV-ONE")
+    assert repo.get_order("KV-ONE").status is OrderStatus.CANCELLED
     assert [item.id for item in repo.list_user_orders(10)] == ["KV-TWO", "KV-ONE"]
 
 
@@ -49,7 +50,7 @@ def test_duplicate_ids_are_rejected(tmp_path):
 def test_duplicate_provider_payment_id_is_rejected(tmp_path):
     repo = repository(tmp_path)
     repo.create_order(order(), "Synthetic")
-    repo.create_order(order("KV-TWO"), "Synthetic")
+    repo.create_order(order("KV-TWO", 20), "Synthetic")
     repo.update_provider_reference("KV-ONE", "provider", "same-payment")
     with pytest.raises(sqlite3.IntegrityError):
         repo.update_provider_reference("KV-TWO", "provider", "same-payment")

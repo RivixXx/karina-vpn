@@ -42,6 +42,8 @@ try:
     from .ui.support import FAQS, faq_view, support_home_view
     from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
+    from .payment_worker import ServiceApplication
+    from .payment_delivery import deliver as deliver_outbox
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
     from application import build_client_service
@@ -61,6 +63,8 @@ except ImportError:  # Direct execution from the src directory.
     from ui.support import FAQS, faq_view, support_home_view
     from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
+    from payment_worker import ServiceApplication
+    from payment_delivery import deliver as deliver_outbox
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -74,7 +78,7 @@ EXPECTED_BILLING_ERRORS = (BillingError, sqlite3.Error)
 def build_billing_service():
     repository = BillingRepository(DB_FILE)
     repository.init_schema()
-    return BillingService(repository, build_client_service())
+    return BillingService(repository, build_client_service)
 
 
 def create_telegram_link(tg_id, email, username="", first_name=""):
@@ -87,10 +91,24 @@ def create_telegram_link(tg_id, email, username="", first_name=""):
         )
 
 
+def bind_order_customer(tg_id, email):
+    """Payment retries must never replace somebody else\'s binding."""
+    with closing(db_connect()) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute("SELECT tg_id, email FROM telegram_links WHERE tg_id=? OR email=?",
+                          (tg_id, email)).fetchall()
+        if rows:
+            if len(rows) == 1 and rows[0][0] == tg_id and rows[0][1] == email:
+                return
+            raise ReconciliationRequiredError("Payment binding conflicts with existing ownership")
+        db.execute("INSERT INTO telegram_links(tg_id, email, linked_at) VALUES (?, ?, ?)",
+                   (tg_id, email, int(time.time())))
+
+
 def build_customer_order_service():
     return CustomerOrderService(
-        build_billing_service(), build_client_service(), get_link_by_tg,
-        lambda tg_id, email: create_telegram_link(tg_id, email),
+        build_billing_service(), build_client_service, get_link_by_tg,
+        bind_order_customer,
     )
 
 
@@ -855,9 +873,10 @@ async def apply_referral_reward(order, context):
     reward = referrals.qualify_after_first_successful_payment(order)
     if reward is None or reward["applied_at"] is None or reward["notified_at"] is not None:
         return reward
-    expiry = datetime.fromtimestamp(
-        reward["target_expiry_ms"] / 1000, MOSCOW_TIMEZONE,
-    ).strftime("%d.%m.%Y")
+    current_expiry = reward.get("current_expiry_ms", reward["target_expiry_ms"])
+    expiry = ("бессрочно" if current_expiry == 0 else datetime.fromtimestamp(
+        current_expiry / 1000, MOSCOW_TIMEZONE,
+    ).strftime("%d.%m.%Y"))
     try:
         await context.bot.send_message(
             chat_id=reward["recipient_tg_id"],
@@ -870,7 +889,52 @@ async def apply_referral_reward(order, context):
         referrals.repository.mark_notified(reward["id"])
     except Exception:
         LOGGER.warning("Referral reward notification failed", exc_info=True)
+        raise
     return reward
+
+
+async def deliver_payment_effects(context):
+    await deliver_outbox(context, BillingRepository(DB_FILE), build_client_service,
+                         apply_referral_reward, ADMIN_TG_ID)
+
+
+async def payment_admin(update, context, order_id=None, page=0):
+    if not is_private_chat(update) or not is_admin(update):
+        return
+    repository = BillingRepository(DB_FILE)
+    if order_id is not None:
+        order = repository.get_order(order_id)
+        if order is None:
+            await show_text(update, context, "Заявка не найдена")
+            return
+        operation = repository.get_operation(order.id)
+        text = (f"💳 Заявка №{order.id}\nTelegram ID: {order.tg_id}\n"
+                f"Срок: {order.days} дней\nСумма: {order.amount_rub} ₽\nСтатус: {order.status.value}")
+        if operation:
+            target = datetime.fromtimestamp(operation["target_expiry_ms"] / 1000, MOSCOW_TIMEZONE)
+            text += f"\nДата по операции: {target:%d.%m.%Y %H:%M}\nПоследняя ошибка: {operation['last_error'] or 'нет'}"
+        rows = []
+        if order.status is OrderStatus.PENDING:
+            text += "\n\nПодтверждайте только после проверки фактической оплаты."
+            rows.append([InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"oa:{order.id}"),
+                         InlineKeyboardButton("❌ Отклонить", callback_data=f"or:{order.id}")])
+        elif order.status is OrderStatus.PAID:
+            text += "\n\nОплата принята. Повтор завершает сохранённую операцию без добавления дней повторно."
+            rows.append([InlineKeyboardButton("🔄 Повторить активацию", callback_data=f"oa:{order.id}")])
+    else:
+        summary = repository.effect_summary()
+        text = ("💳 Заявки и восстановление\n\nСначала показаны незавершённые активации.\n"
+                f"В очереди доставки: {summary['pending']}; с ошибками: {summary['failed']}.")
+        orders = repository.recovery_orders(limit=11, offset=page * 10)
+        rows = [[InlineKeyboardButton(f"{order.id} · {order.status.value}",
+                 callback_data=f"payment_admin:{order.id}")] for order in orders[:10]]
+        if page:
+            rows.append([InlineKeyboardButton("← Предыдущие", callback_data=f"payments:{page-1}")])
+        if len(orders) > 10:
+            rows.append([InlineKeyboardButton("Следующие →", callback_data=f"payments:{page+1}")])
+    rows.append([InlineKeyboardButton("🔄 Обновить список", callback_data="payments:0")])
+    rows.append([InlineKeyboardButton("🏠 Главная", callback_data="admin_home")])
+    await show_text(update, context, text, reply_markup=InlineKeyboardMarkup(rows))
 
 
 async def render_support_home(update, context):
@@ -1001,6 +1065,7 @@ def admin_home_keyboard():
                 ),
             ],
             [InlineKeyboardButton("🔧 Сервис", callback_data="admin_service")],
+            [InlineKeyboardButton("💳 Заявки и восстановление", callback_data="payments:0")],
         ]
     )
 
@@ -1675,9 +1740,28 @@ async def render_membership_error(update):
 
 
 async def render_tariffs(update, back_callback=None, context=None):
-    text, keyboard = tariff_list_view(support_url=SUPPORT_URL, back_callback=back_callback)
-    if context is not None:
+    repository = BillingRepository(DB_FILE)
+    repository.init_schema()
+    pending = repository.get_pending_for_user(update.effective_user.id)
+    if pending:
+        text, keyboard = pending_request_view(pending, get_tariff(pending.plan_id), back_callback="client_home")
         await show_text(update, context, text, reply_markup=keyboard)
+        return
+    limit = getattr(CUSTOMER_CONFIG, "default_hwid_limit", None)
+    link = get_link_by_tg(update.effective_user.id)
+    if link:
+        try:
+            bundle = build_client_service().get_client_bundle(link["email"])
+            if bundle:
+                limit = bundle.primary.device_limit
+        except EXPECTED_SERVICE_ERRORS:
+            LOGGER.warning("Payment device limit unavailable", exc_info=True)
+    text, keyboard = tariff_list_view(support_url=SUPPORT_URL,
+                                     back_callback=back_callback or "client_home", device_limit=limit)
+    if context is not None:
+        sticker = await resolve_sticker(context, 3)
+        await show_compound(update, context, screen_key="payment", sticker=sticker,
+                            text=text, reply_markup=keyboard)
     elif update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
@@ -1702,12 +1786,25 @@ def build_referral_service():
 
 
 def pending_request_view(order, plan, *, back_callback):
+    if order.status is OrderStatus.PAID:
+        return (f"⏳ ОПЛАТА ПРИНЯТА\n\nЗаявка №{order.id}\nАктивация подписки ещё не завершена.\n"
+                "Повторно платить не нужно. При задержке обратитесь в поддержку.", InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"order_status:{order.id}")],
+            [InlineKeyboardButton("✍️ Поддержка", callback_data="client_support")],
+            [InlineKeyboardButton("← Назад", callback_data=back_callback)],
+        ]))
     created = datetime.fromtimestamp(order.created_at, MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M")
-    text = (f"🧾 Заявка на оплату\n\nТариф: {plan.title}\n"
-            f"Сумма: {plan.price_rub} ₽\nСтатус: ожидает оплаты\nСоздана: {created}")
+    text = ("⏳ ОПЛАТА ОЖИДАЕТ ПОДТВЕРЖДЕНИЯ\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"Тариф: {order.plan_title or (plan.title if plan else order.plan_id)}\nСумма: {order.amount_rub:,} ₽\n"
+            f"🧾 Заявка №{order.id}\nСтатус: ожидает подтверждения\nСоздана: {created}\n\n"
+            "Для оплаты обратитесь в поддержку: платёжная ссылка в боте не подключена.\n"
+            "После проверки оплаты администратором срок обновится автоматически.\n"
+            "Если уже оплатили, повторно платить не нужно.").replace(",", " ")
     return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"order_status:{order.id}")],
         [InlineKeyboardButton("Изменить тариф", callback_data=f"order_change:{order.id}")],
         [InlineKeyboardButton("Отменить заявку", callback_data=f"order_cancel:{order.id}")],
+        [InlineKeyboardButton("✍️ Поддержка", callback_data="client_support")],
         [InlineKeyboardButton("← Назад", callback_data=back_callback)],
     ])
 
@@ -1814,32 +1911,72 @@ async def callbacks(
     data = query.data
     if not isinstance(data, str):
         return
+    if re.fullmatch(r"payments:[0-9]{1,6}", data):
+        await payment_admin(update, context, page=int(data.split(":", 1)[1]))
+        return
+    if re.fullmatch(r"payment_admin:[A-Za-z0-9_-]+", data):
+        await payment_admin(update, context, order_id=data.split(":", 1)[1])
+        return
+    if data == "client_pay":
+        data = "tariffs"
+    elif data.startswith("bill_plan:"):
+        data = "tariff:" + data.split(":", 1)[1]
+    elif data.startswith("bill_pay:"):
+        data = "order_status:" + data.split(":", 1)[1]
+    elif data.startswith("bill_cancel:"):
+        data = "order_cancel:" + data.split(":", 1)[1]
+    elif data.startswith("order_cancel_no:"):
+        data = "order_status:" + data.split(":", 1)[1]
+    if data == "client_support":
+        await render_support_home(update, context)
+        return
+    if data == "client_home" and not get_link_by_tg(update.effective_user.id):
+        text, keyboard = welcome_view()
+        await show_text(update, context, text, reply_markup=keyboard)
+        return
     if data == "welcome_start":
         await render_tariffs(update, context=context)
         return
-    if re.fullmatch(r"order_change:[A-Za-z0-9_-]+", data):
-        context.user_data["replace_order_id"] = data.split(":", 1)[1]
-        await render_tariffs(update, back_callback="client_home" if get_link_by_tg(update.effective_user.id) else None, context=context)
-        return
-    if re.fullmatch(r"order_cancel:[A-Za-z0-9_-]+", data):
+    if re.fullmatch(r"order_(?:status|change|change_yes|cancel):[A-Za-z0-9_-]+", data):
         order_id = data.split(":", 1)[1]
-        await show_text(update, context, "Отменить заявку на оплату?", reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("Да, отменить", callback_data=f"order_cancel_yes:{order_id}"),
-            InlineKeyboardButton("Нет", callback_data=f"order_cancel_no:{order_id}"),
-        ]]))
+        try:
+            orders = build_customer_order_service()
+            order = orders.get_request(update.effective_user.id, order_id)
+            if order.status is not OrderStatus.PENDING:
+                labels = {OrderStatus.COMPLETED: "✅ Оплата подтверждена", OrderStatus.CANCELLED: "Заявка отменена",
+                          OrderStatus.FAILED: "Заявка не выполнена", OrderStatus.PAID: "Оплата получена, подписка обрабатывается"}
+                await show_text(update, context, labels[order.status], reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")]]))
+                return
+            if data.startswith("order_change_yes:"):
+                orders.reject(order_id)
+                context.user_data.pop("replace_order_id", None)
+                await render_tariffs(update, context=context)
+                return
+            if data.startswith("order_status:"):
+                text, keyboard = pending_request_view(order, get_tariff(order.plan_id), back_callback="client_home")
+            else:
+                changing = data.startswith("order_change:")
+                text = ("🔁 ИЗМЕНИТЬ ТАРИФ?\n\nТекущая заявка будет отменена. После отмены оплата по ней не активирует подписку."
+                        if changing else "❌ ОТМЕНИТЬ ЗАЯВКУ?\n\nПосле отмены заявка больше не сможет активировать или продлить подписку.")
+                plan = get_tariff(order.plan_id)
+                text += f"\n\nТариф: {plan.title if plan else order.plan_id}\nСумма: {order.amount_rub} ₽"
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton("✅ Изменить тариф" if changing else "❌ Да, отменить",
+                        callback_data=f"order_change_yes:{order_id}" if changing else f"order_cancel_yes:{order_id}"),
+                    InlineKeyboardButton("← Оставить текущую", callback_data=f"order_status:{order_id}"),
+                ]])
+            await show_text(update, context, text, reply_markup=keyboard)
+        except (CustomerOrderError, BillingError, sqlite3.Error):
+            await query.answer("Заявка недоступна", show_alert=True)
         return
-    if re.fullmatch(r"order_cancel_(?:yes|no):[A-Za-z0-9_-]+", data):
-        answer, order_id = data.split(":", 1)
+    if re.fullmatch(r"order_cancel_yes:[A-Za-z0-9_-]+", data):
+        order_id = data.split(":", 1)[1]
         try:
             orders = build_customer_order_service()
             order = orders.get_request(update.effective_user.id, order_id)
         except (CustomerOrderError, BillingError, sqlite3.Error):
             await query.answer("Заявка недоступна", show_alert=True)
-            return
-        if answer.endswith("no"):
-            plan = get_tariff(order.plan_id)
-            text, keyboard = pending_request_view(order, plan, back_callback="client_home" if get_link_by_tg(order.tg_id) else "tariffs")
-            await show_text(update, context, text, reply_markup=keyboard)
             return
         try:
             orders.reject(order_id)
@@ -1847,7 +1984,10 @@ async def callbacks(
             await query.answer("Заявка уже закрыта", show_alert=True)
             return
         context.user_data.pop("replace_order_id", None)
-        await render_tariffs(update, back_callback="client_home" if get_link_by_tg(order.tg_id) else None, context=context)
+        await show_text(update, context, "✅ Заявка отменена.", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("💎 Выбрать другой тариф", callback_data="tariffs")],
+            [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")],
+        ]))
         return
     if data == "membership_check":
         try:
@@ -1874,30 +2014,11 @@ async def callbacks(
             orders = build_customer_order_service()
             if action == "oa":
                 order, changed = orders.approve(order_id)
-                await apply_referral_reward(order, context)
                 await query.edit_message_text("✅ Заявка подтверждена." if changed else "✅ Заявка уже подтверждена.")
-                if changed:
-                    bundle = build_client_service().get_client_bundle(order.email)
-                    expiry = bundle.primary.expiry_text.split()[0] if bundle else "уточняется"
-                    await context.bot.send_message(
-                        chat_id=order.tg_id,
-                        text=("🎉 Карина VPN активирована!\n\n"
-                              f"Тариф: {get_tariff(order.plan_id).title}\nАктивна до: {expiry}\n\n"
-                              "Теперь осталось подключить VPN."),
-                        reply_markup=InlineKeyboardMarkup([
-                            [InlineKeyboardButton("🔑 Получить подключение", callback_data="client_connect")],
-                            [InlineKeyboardButton("🎬 Как подключить", callback_data="connect_help")],
-                            [InlineKeyboardButton("👤 Мой кабинет", callback_data="client_home")],
-                        ]),
-                    )
             else:
                 order, changed = orders.reject(order_id)
                 await query.edit_message_text("❌ Заявка отклонена." if changed else "❌ Заявка уже отклонена.")
-                if changed:
-                    await context.bot.send_message(
-                        chat_id=order.tg_id,
-                        text="❌ Заявка отклонена.\n\nЕсли это ошибка, обратитесь в поддержку.",
-                    )
+            # Durable delivery is handled independently by the outbox worker.
         except (CustomerOrderError, BillingError, ClientServiceError, sqlite3.Error) as exc:
             LOGGER.warning("Order moderation failed", exc_info=True)
             await query.edit_message_text(f"⚠️ {safe_user_error(exc, admin=True)}")
@@ -2017,7 +2138,7 @@ async def callbacks(
             except ValueError:
                 await query.answer("Тариф недоступен", show_alert=True)
                 return
-            await query.edit_message_text(text, reply_markup=keyboard)
+            await show_text(update, context, text, reply_markup=keyboard)
         return
 
     if re.fullmatch(r"order:[a-z0-9]+", data):
@@ -2058,20 +2179,9 @@ async def callbacks(
             await query.answer("Не удалось создать заявку", show_alert=True)
             return
         text, keyboard = pending_request_view(
-            order, plan, back_callback="client_home" if link else "tariffs",
+            order, plan, back_callback="client_home",
         )
         await show_text(update, context, text, reply_markup=keyboard)
-        if created:
-            display = user.full_name or user.username or "Пользователь Telegram"
-            await context.bot.send_message(
-                chat_id=ADMIN_TG_ID,
-                text=(f"💳 Новая заявка\n\nПользователь: {display}\n"
-                      f"Тариф: {plan.title}\nСтоимость: {plan.price_rub} ₽"),
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("✅ Подтвердить", callback_data=f"oa:{order.id}"),
-                    InlineKeyboardButton("❌ Отклонить", callback_data=f"or:{order.id}"),
-                ]]),
-            )
         return
 
     # CLIENT
@@ -2283,66 +2393,6 @@ async def callbacks(
         )
         return
 
-    if data == "client_pay":
-        try:
-            plans = build_billing_service().list_plans()
-        except EXPECTED_BILLING_ERRORS:
-            LOGGER.warning("Unable to load billing plans", exc_info=True)
-            await query.answer("Не удалось загрузить тарифы", show_alert=True)
-            return
-
-        await query.edit_message_text(
-            "💳 *Продлить Карина VPN*\n\nВыберите тариф:",
-            reply_markup=billing_plans_keyboard(plans), parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-
-    if data.startswith("bill_plan:"):
-        plan_id = data.removeprefix("bill_plan:")
-        try:
-            billing = build_billing_service()
-            plan = next((item for item in billing.list_plans() if item.id == plan_id), None)
-            order = billing.create_order(user.id, email, plan_id)
-        except EXPECTED_BILLING_ERRORS:
-            LOGGER.warning("Unable to create billing order", exc_info=True)
-            await query.answer("Не удалось создать заказ", show_alert=True)
-            return
-        await query.edit_message_text(
-            format_billing_order(order, plan), reply_markup=billing_order_keyboard(order),
-            parse_mode=ParseMode.MARKDOWN_V2,
-        )
-        return
-
-    if data.startswith(("bill_pay:", "bill_cancel:")):
-        action, order_id = data.split(":", 1)
-        try:
-            billing = build_billing_service()
-            order = billing.get_order(order_id)
-            if order is None or order.tg_id != user.id or order.email != email:
-                raise BillingAccessError("Заказ принадлежит другому пользователю")
-            if action == "bill_cancel":
-                billing.cancel_order(order_id, user.id)
-        except EXPECTED_BILLING_ERRORS:
-            LOGGER.warning("Billing order access failed", exc_info=True)
-            await query.answer("Заказ недоступен", show_alert=True)
-            return
-        if action == "bill_pay":
-            if order.status is OrderStatus.COMPLETED:
-                text = "✅ *Заказ выполнен\\.*"
-            else:
-                text = "💳 *Платёжный провайдер ещё не подключён\\.*"
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Назад", callback_data="client_pay")
-            ]]), parse_mode=ParseMode.MARKDOWN_V2)
-        else:
-            await query.edit_message_text(
-                "❌ Заказ отменён\\.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⬅️ К тарифам", callback_data="client_pay")
-                ]]), parse_mode=ParseMode.MARKDOWN_V2,
-            )
-        return
-
     if data == "client_bonus":
         rows = build_referral_service().repository.list_rewards(user.id)
         await show_text(
@@ -2370,15 +2420,19 @@ def main():
     CUSTOMER_CONFIG = config
     SUPPORT_URL = config.support_url
     init_db()
+    BillingRepository(DB_FILE).init_schema()
+    ReferralRepository(DB_FILE).init_schema()
 
     app = (
         Application
         .builder()
         .token(BOT_TOKEN)
-        .application_class(AvatarApplication)
+        .application_class(ServiceApplication)
         .build()
     )
     app.bot_data["config"] = config
+    app.bot_data["deliver_payment_effects"] = deliver_payment_effects
+    app.add_handler(CommandHandler("payments", payment_admin))
 
     app.add_handler(
         CommandHandler(

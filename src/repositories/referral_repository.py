@@ -1,9 +1,13 @@
 import secrets
 import sqlite3
 from contextlib import closing
+from .operation_lock import operation_lock
 
 
 class ReferralRepository:
+    def operation_lock(self):
+        return operation_lock(self._connect)
+
     def __init__(self, db_path, *, connect=None, now_provider=None):
         self.db_path = db_path
         self._connect_factory = connect
@@ -56,6 +60,16 @@ class ReferralRepository:
                 CREATE INDEX IF NOT EXISTS idx_rewards_recipient
                     ON referral_rewards(recipient_tg_id);
             """)
+
+    def first_completed_order(self, tg_id):
+        with closing(self._connect()) as db:
+            row = db.execute("SELECT order_id FROM orders WHERE tg_id=? AND status=\'completed\' "
+                             "ORDER BY applied_at, id LIMIT 1", (tg_id,)).fetchone()
+            return row[0] if row else None
+
+    def payment_in_progress(self, tg_id):
+        with closing(self._connect()) as db:
+            return db.execute("SELECT 1 FROM orders WHERE tg_id=? AND status=\'paid\'", (tg_id,)).fetchone() is not None
 
     def get_or_create_profile(self, tg_id):
         now = int(self.now_provider())
@@ -124,7 +138,8 @@ class ReferralRepository:
                     SELECT MAX(target_expiry_ms) FROM referral_rewards
                     WHERE recipient_tg_id=? AND reward_type='subscription_days'
                 """, (referral["referrer_tg_id"],)).fetchone()[0]
-                target = max(observed_expiry_ms or 0, previous or 0, now_ms) + days * 86400000
+                target = (0 if observed_expiry_ms == 0 else
+                          max(observed_expiry_ms, previous or 0, now_ms) + days * 86400000)
                 db.execute("UPDATE referral_rewards SET target_expiry_ms=? WHERE id=?", (target, reward["id"]))
             db.commit()
             return db.execute("SELECT * FROM referral_rewards WHERE id=?", (reward["id"],)).fetchone()

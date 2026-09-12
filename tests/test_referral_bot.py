@@ -1,5 +1,6 @@
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
+import pytest
 
 from src import bot
 
@@ -70,7 +71,8 @@ def test_notification_failure_does_not_rollback_applied_reward(monkeypatch):
     monkeypatch.setattr(bot, "build_referral_service", lambda: service)
     monkeypatch.setattr(bot, "LOGGER", NS(warning=Mock()))
     context = NS(bot=NS(send_message=AsyncMock(side_effect=RuntimeError("telegram"))))
-    run(bot.apply_referral_reward(NS(), context))
+    with pytest.raises(RuntimeError):
+        run(bot.apply_referral_reward(NS(), context))
     repository.mark_notified.assert_not_called()
     assert reward["applied_at"] == 1
 

@@ -1,4 +1,5 @@
 from types import SimpleNamespace as NS
+from dataclasses import replace
 from unittest.mock import Mock
 from unittest.mock import AsyncMock
 
@@ -31,7 +32,8 @@ def client(*, expiry=2_000_000_000_000, enabled=True, devices=2, limit=5,
 
 
 def bundle(**kwargs):
-    return ClientBundle(client(**kwargs), client(email="tg_42__mobile", limit=0))
+    return ClientBundle(client(**kwargs), client(email="tg_42__mobile", limit=0,
+                        expiry=kwargs.get("expiry", 2_000_000_000_000)))
 
 
 def callbacks(markup):
@@ -181,14 +183,22 @@ class FakeClientService:
     def get_client_bundle(self, email):
         return self.current
 
-    def create_client_bundle(self, email, days):
+    def create_client_bundle(self, email, days, *, target_expiry_ms=None):
         if self.fail_create:
             raise RuntimeError("provision failed")
-        self.created.append((email, days))
-        self.current = bundle(email=email)
+        if self.current is None:
+            self.created.append((email, days))
+            self.current = bundle(email=email, expiry=target_expiry_ms)
 
     def extend_bundle(self, email, days):
         self.extended.append((email, days))
+
+    def set_bundle_expiry(self, email, target):
+        self.extended.append((email, target))
+        self.current = replace(self.current,
+            primary=replace(self.current.primary, expiry_time_ms=target),
+            mobile=replace(self.current.mobile, expiry_time_ms=target))
+        return self.current.primary
 
 
 def order_service(tmp_path, local_db, *, link=None, client_service=None):
@@ -239,12 +249,12 @@ def test_new_user_approval_provisions_once_binds_and_is_idempotent(tmp_path, loc
 def test_new_user_retry_after_status_write_failure_does_not_extend_or_recreate(tmp_path, local_db):
     service, repo, clients, links = order_service(tmp_path, local_db)
     order, _ = service.create_request(42, "m3")
-    approve = repo.approve_pending
-    repo.approve_pending = Mock(return_value=None)
+    approve = repo.complete_operation
+    repo.complete_operation = Mock(return_value=None)
     with pytest.raises(Exception, match="статус"):
         service.approve(order.id)
     assert clients.created == [("tg_42", 90)] and links[42]["email"] == "tg_42"
-    repo.approve_pending = approve
+    repo.complete_operation = approve
     completed, changed = service.approve(order.id)
     assert changed and completed.status is OrderStatus.COMPLETED
     assert clients.created == [("tg_42", 90)] and clients.extended == []
@@ -255,7 +265,7 @@ def test_renewal_uses_existing_bundle_and_never_creates_second(tmp_path, local_d
     service, _, clients, _ = order_service(tmp_path, local_db, link={"email": "existing"}, client_service=clients)
     order, _ = service.create_request(42, "m1")
     service.approve(order.id)
-    assert clients.created == [] and clients.extended == [("existing", 30)]
+    assert clients.created == [] and clients.extended == [("existing", 2_000_000_000_000 + 30 * 86400000)]
 
 
 def test_unlimited_renewal_is_controlled(tmp_path, local_db):
@@ -272,7 +282,11 @@ def test_rejection_and_provision_failure_are_safe(tmp_path, local_db):
     order, _ = service.create_request(42, "m1")
     with pytest.raises(RuntimeError):
         service.approve(order.id)
-    assert repo.get_order(order.id).status is OrderStatus.PENDING
-    rejected, changed = service.reject(order.id)
-    again, duplicate = service.reject(order.id)
+    assert repo.get_order(order.id).status is OrderStatus.PAID
+    with pytest.raises(Exception, match="закрыта"):
+        service.reject(order.id)
+    service.billing.token_factory = lambda: "CANCEL"
+    pending, _ = service.create_request(43, "m1")
+    rejected, changed = service.reject(pending.id)
+    again, duplicate = service.reject(pending.id)
     assert changed and not duplicate and rejected.status is again.status is OrderStatus.CANCELLED

@@ -5,6 +5,9 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 from src.telegram_format import markdown_v2_escape
+from src.models import OrderStatus
+from src.services import BillingError, CustomerOrderError
+from src.ui.tariffs import get_tariff
 
 
 def run(coroutine):
@@ -373,19 +376,41 @@ def test_client_connect_and_reset_are_bound_to_own_email(bot):
     bot["_service"].reset_bundle_devices.assert_called_once_with("demo_other")
 
 
-def test_pending_request_change_returns_to_tariffs_without_creating_order(bot):
+def pending_orders(bot):
+    orders = NS(get_request=Mock(return_value=NS(
+        id="KV-SYNTHETIC", plan_id="m3", amount_rub=499,
+        status=OrderStatus.PENDING,
+    )), reject=Mock())
+    bot.update(build_customer_order_service=lambda: orders,
+               OrderStatus=OrderStatus, CustomerOrderError=CustomerOrderError,
+               BillingError=BillingError, get_tariff=get_tariff)
+    return orders
+
+
+def test_pending_request_change_requires_confirmation(bot):
+    orders = pending_orders(bot)
     context = NS(user_data={})
     upd = invoke(bot, "order_change:KV-SYNTHETIC", context=context, user=44)
-    assert context.user_data["replace_order_id"] == "KV-SYNTHETIC"
-    assert upd.callback_query.edit_message_text.call_args.args[0] == "tariffs"
+    orders.get_request.assert_called_once_with(44, "KV-SYNTHETIC")
+    orders.reject.assert_not_called()
+    assert "replace_order_id" not in context.user_data
+    call = upd.callback_query.edit_message_text.call_args
+    assert "ИЗМЕНИТЬ ТАРИФ?" in call.args[0]
+    assert call.kwargs["reply_markup"][0][0].callback_data == "order_change_yes:KV-SYNTHETIC"
+    bot["render_tariffs"] = AsyncMock()
+    invoke(bot, "order_change_yes:KV-SYNTHETIC", context=context, user=44)
+    orders.reject.assert_called_once_with("KV-SYNTHETIC")
+    bot["render_tariffs"].assert_awaited_once()
 
 
 def test_pending_request_cancel_requires_confirmation(bot):
+    orders = pending_orders(bot)
     upd = invoke(bot, "order_cancel:KV-SYNTHETIC", context=NS(user_data={}), user=44)
     call = upd.callback_query.edit_message_text.call_args
-    assert call.args[0] == "Отменить заявку на оплату?"
+    orders.reject.assert_not_called()
+    assert "ОТМЕНИТЬ ЗАЯВКУ?" in call.args[0]
     callbacks = [button.callback_data for button in call.kwargs["reply_markup"][0]]
-    assert callbacks == ["order_cancel_yes:KV-SYNTHETIC", "order_cancel_no:KV-SYNTHETIC"]
+    assert callbacks == ["order_cancel_yes:KV-SYNTHETIC", "order_status:KV-SYNTHETIC"]
 
 
 def test_main_sticker_resolves_first_item_and_caches_file_id(bot):

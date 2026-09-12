@@ -61,18 +61,17 @@ def test_apply_is_idempotent_and_extends_exact_days(billing):
     service, client = billing
     order = service.create_order(10, "synthetic_user", "m6")
     service.mark_paid(order.id, "provider", "payment")
-    completed = service.apply_paid_order(order.id)
-    assert completed.status is OrderStatus.COMPLETED
-    client.extend_client.assert_called_once_with("synthetic_user", 180)
-    assert service.apply_paid_order(order.id) == completed
-    client.extend_client.assert_called_once()
+    with pytest.raises(BillingStateError, match="CustomerOrderService"):
+        service.apply_paid_order(order.id)
+    client.extend_client.assert_not_called()
+    assert service.get_order(order.id).status is OrderStatus.PAID
 
 
 def test_extend_failure_leaves_order_paid(billing):
     service, client = billing
     order = service.create_order(10, "synthetic_user", "y1")
     service.mark_paid(order.id, "provider", "payment")
-    client.extend_client.side_effect = RuntimeError("synthetic")
+    service.apply_order = Mock(side_effect=RuntimeError("synthetic"))
     with pytest.raises(RuntimeError):
         service.apply_paid_order(order.id)
     assert service.get_order(order.id).status is OrderStatus.PAID

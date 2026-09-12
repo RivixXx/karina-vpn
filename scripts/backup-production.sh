@@ -4,6 +4,8 @@ set -Eeuo pipefail
 [[ "$(uname -s)" == Linux ]] || { echo "Linux is required" >&2; exit 1; }
 [[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "Run as root" >&2; exit 1; }
 DEST="/root/karina-backups/$(date +%Y%m%d-%H%M%S)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+umask 077
 install -d -m 700 "$DEST"
 
 copy_if_present() {
@@ -14,14 +16,22 @@ copy_if_present() {
   fi
 }
 
+snapshot_if_present() {
+  local source=$1 name=$2
+  if [[ -f "$source" ]]; then
+    python3 "$ROOT/src/sqlite_backup.py" --source "$source" --destination "$DEST/$name"
+  fi
+}
+
 copy_if_present /etc/karina-vpn/config.env karina-config.env
-copy_if_present /etc/x-ui/x-ui.db x-ui.db
+snapshot_if_present /etc/x-ui/x-ui.db x-ui.db
 copy_if_present /opt/karina-bot/.env legacy-bot.env
-copy_if_present /opt/karina-bot/karina.db karina.db
+snapshot_if_present /opt/karina-bot/karina.db karina.db
 copy_if_present /etc/systemd/system/karina-bot.service karina-bot.service
 copy_if_present /etc/systemd/system/karina-notifier.service karina-notifier.service
 copy_if_present /etc/systemd/system/karina-notifier.timer karina-notifier.timer
 copy_if_present /etc/nginx/sites-available/vpn.parsekk.ru nginx-vpn.parsekk.ru
 copy_if_present /etc/nginx/sites-enabled/vpn.parsekk.ru nginx-vpn.parsekk.ru.enabled
 find "$DEST" -type f -exec chmod 600 {} +
+printf 'Verified SQLite snapshots completed\n' > "$DEST/COMPLETE"
 echo "Backup created: $DEST"

@@ -35,6 +35,7 @@ class Order:
     paid_at: int | None
     applied_at: int | None
     kind: str = "renewal"
+    plan_title: str | None = None
 
 
 PLANS = (

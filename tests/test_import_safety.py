@@ -60,7 +60,13 @@ def test_billing_modules_import_without_external_access(monkeypatch):
     for name in ("src.models.billing", "src.repositories.billing_repository",
                  "src.services.billing_service"):
         module = importlib.import_module(name)
-        importlib.reload(module)
+        original = module.__dict__.copy()
+        try:
+            importlib.reload(module)
+        finally:
+            # Reload must not replace exception/enum identities for later tests.
+            module.__dict__.clear()
+            module.__dict__.update(original)
 
 
 def test_application_import_has_no_production_access(monkeypatch):
@@ -113,7 +119,9 @@ def test_bot_import_has_no_production_access(monkeypatch):
     monkeypatch.setattr("pathlib.Path.read_text", blocked)
     monkeypatch.setattr("urllib.request.build_opener", blocked)
     monkeypatch.setattr("sqlite3.connect", blocked)
-    sys.modules.pop("src.bot", None)
+    import src
+    monkeypatch.setattr(src, "bot", getattr(src, "bot", None), raising=False)
+    monkeypatch.delitem(sys.modules, "src.bot", raising=False)
     module = importlib.import_module("src.bot")
     assert module.BOT_TOKEN is None and module.ADMIN_TG_ID is None
 

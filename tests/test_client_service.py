@@ -895,3 +895,21 @@ def test_bundle_partial_updates_require_reconciliation(config, tmp_path, operati
             service.set_hwid_limit("demo", 3)
         else:
             service.disable_client("demo")
+
+
+def test_payment_creation_retry_preserves_exact_expiry_and_credentials(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_ids": (5, 6)})
+    service, xui = make_service(config, tmp_path, issue=lambda value: value)
+    target = 1_900_000_000_000
+    first = service.create_client_bundle("payment_user", target_expiry_ms=target)
+    before = deepcopy(xui.clients)
+    service.now_provider = lambda: target + 86400000
+    second = service.create_client_bundle("payment_user", target_expiry_ms=target)
+    assert second.bundle.primary.expiry_time_ms == target
+    assert second.bundle.mobile.expiry_time_ms == target
+    assert first.bundle.primary.sub_id == second.bundle.primary.sub_id
+    assert xui.clients == before
+    with pytest.raises(ReconciliationRequiredError):
+        service.create_client_bundle("payment_user", target_expiry_ms=target + 1)
+    assert xui.clients == before

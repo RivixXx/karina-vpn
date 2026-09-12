@@ -48,7 +48,7 @@ class BillingService:
             plan_id=plan.id, days=plan.days, amount_rub=plan.price_rub,
             status=OrderStatus.PENDING, provider=None, provider_payment_id=None,
             created_at=self.now_provider(), paid_at=None, applied_at=None,
-            kind=kind,
+            kind=kind, plan_title=plan.title,
         )
         return self.repository.create_order(order, plan.title)
 
@@ -70,14 +70,21 @@ class BillingService:
         order = self._require(order_id)
         if order.status is not OrderStatus.PENDING:
             raise BillingStateError("Заказ не ожидает оплаты")
-        self.repository.update_provider_reference(order_id, provider, provider_payment_id)
-        return self.repository.mark_paid(order_id, self.now_provider())
+        if not provider or not provider_payment_id:
+            raise BillingStateError("Payment reference is required")
+        result = self.repository.mark_paid(order_id, self.now_provider(), provider, provider_payment_id)
+        if result is None:
+            raise BillingStateError("Order state changed")
+        return result
 
     def mark_failed(self, order_id):
         order = self._require(order_id)
         if order.status not in {OrderStatus.PENDING, OrderStatus.PAID}:
             raise BillingStateError("Заказ нельзя пометить неуспешным")
-        return self.repository.mark_failed(order_id, order.status)
+        result = self.repository.mark_failed(order_id, order.status)
+        if result is None:
+            raise BillingStateError("Начатую операцию нужно восстановить, а не закрывать")
+        return result
 
     def apply_paid_order(self, order_id):
         order = self._require(order_id)
@@ -85,11 +92,10 @@ class BillingService:
             return order
         if order.status is not OrderStatus.PAID:
             raise BillingStateError("Применить можно только оплаченный заказ")
-        self.client_service.extend_client(order.email, order.days)
-        completed = self.repository.mark_completed(order.id, self.now_provider())
-        if completed is None:
-            raise BillingStateError("Статус заказа изменился во время применения")
-        return completed
+        apply_order = getattr(self, "apply_order", None)
+        if apply_order is None:
+            raise BillingStateError("Применение оплаты требует CustomerOrderService")
+        return apply_order(order_id)
 
     def _require(self, order_id):
         order = self.repository.get_order(order_id)

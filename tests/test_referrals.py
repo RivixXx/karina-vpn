@@ -26,8 +26,11 @@ def user(tg_id, username="friend", first_name="Friend"):
 
 def service(repo, expiry=1_800_000_000_000):
     client = Mock()
-    client.get_client_bundle.return_value = NS(primary=NS(expiry_time_ms=expiry), mobile=NS())
-    client.set_bundle_expiry.side_effect = lambda email, target: NS(expiry_time_ms=target)
+    client.get_client_bundle.return_value = NS(primary=NS(expiry_time_ms=expiry), mobile=NS(expiry_time_ms=expiry))
+    def apply(email, target):
+        client.get_client_bundle.return_value = NS(primary=NS(expiry_time_ms=target), mobile=NS(expiry_time_ms=target))
+        return client.get_client_bundle.return_value.primary
+    client.set_bundle_expiry.side_effect = apply
     bindings = {1: {"email": "referrer"}}
     return ReferralService(repo, lambda: client, bindings.get), client
 
@@ -99,8 +102,11 @@ def test_failed_extension_is_unapplied_and_retry_uses_same_absolute_target(local
         referrals.qualify_after_first_successful_payment(order())
     pending = repo.list_rewards(1)
     assert pending == []
-    client.set_bundle_expiry.side_effect = None
-    client.set_bundle_expiry.return_value = NS(expiry_time_ms=1_800_000_000_000 + 3 * 86400000)
+    target = 1_800_000_000_000 + 3 * 86400000
+    def succeed(email, value):
+        client.get_client_bundle.return_value = NS(primary=NS(expiry_time_ms=value), mobile=NS(expiry_time_ms=value))
+        return client.get_client_bundle.return_value.primary
+    client.set_bundle_expiry.side_effect = succeed
     reward = referrals.qualify_after_first_successful_payment(order())
     assert reward["applied_at"] is not None
     assert client.set_bundle_expiry.call_args_list[0] == client.set_bundle_expiry.call_args_list[1]
@@ -116,3 +122,38 @@ def test_restart_preserves_attribution_and_reward_idempotency(local_db):
     restarted, restarted_client = service(reopened)
     restarted.qualify_after_first_successful_payment(order())
     restarted_client.set_bundle_expiry.assert_not_called()
+
+
+def test_retry_does_not_shorten_later_subscription(local_db):
+    repo = repository(local_db)
+    repo.attribute(repo.get_or_create_profile(1)["referral_code"], 2)
+    referrals, client = service(repo)
+    client.set_bundle_expiry.side_effect = RuntimeError("before write")
+    with pytest.raises(RuntimeError):
+        referrals.qualify_after_first_successful_payment(order())
+    later = 1_900_000_000_000
+    client.get_client_bundle.return_value = NS(primary=NS(expiry_time_ms=later), mobile=NS(expiry_time_ms=later))
+    client.set_bundle_expiry.side_effect = lambda email, target: NS(expiry_time_ms=target)
+    reward = referrals.qualify_after_first_successful_payment(order())
+    assert client.set_bundle_expiry.call_args.args[1] == later
+    assert reward["current_expiry_ms"] == later
+
+
+def test_unlimited_referrer_stays_unlimited(local_db):
+    repo = repository(local_db)
+    repo.attribute(repo.get_or_create_profile(1)["referral_code"], 2)
+    referrals, client = service(repo, expiry=0)
+    reward = referrals.qualify_after_first_successful_payment(order())
+    assert reward["applied_at"] is not None and reward["target_expiry_ms"] == 0
+    client.set_bundle_expiry.assert_not_called()
+
+
+def test_incomplete_referrer_payment_defers_reward(local_db):
+    repo = repository(local_db)
+    repo.attribute(repo.get_or_create_profile(1)["referral_code"], 2)
+    with local_db() as db:
+        db.execute("UPDATE orders SET status='paid' WHERE tg_id=1")
+    referrals, client = service(repo)
+    with pytest.raises(Exception, match="still being applied"):
+        referrals.qualify_after_first_successful_payment(order())
+    client.set_bundle_expiry.assert_not_called()

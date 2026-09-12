@@ -36,6 +36,7 @@ sys.modules.setdefault("telegram.ext", extension)
 
 from src import bot
 from src.models import Order, OrderStatus, PLANS
+from src.services import CustomerOrderService
 
 
 def run(coroutine):
@@ -63,6 +64,9 @@ def pending(order_id="KV-SYNTHETIC", tg_id=10, status=OrderStatus.PENDING):
 async def invoke(monkeypatch, data, billing, user_id=10):
     monkeypatch.setattr(bot, "get_link_by_tg", lambda unused: {"email": "synthetic_user"})
     monkeypatch.setattr(bot, "build_billing_service", lambda: billing)
+    monkeypatch.setattr(bot, "build_customer_order_service", lambda: CustomerOrderService(
+        billing, Mock(), bot.get_link_by_tg, Mock(),
+    ))
     item = update(data, user_id)
     await bot.callbacks(item, NS(user_data={}))
     return item
@@ -79,14 +83,16 @@ def test_plan_keyboard_and_callback_limit():
                for row in order_keyboard.inline_keyboard for button in row)
 
 
-def test_select_plan_creates_pending_order(monkeypatch):
+def test_legacy_select_plan_opens_confirmation_without_creating_order(monkeypatch):
     billing = NS(
         list_plans=Mock(return_value=list(PLANS)),
         create_order=Mock(return_value=pending()),
     )
     item = run(invoke(monkeypatch, "bill_plan:m3", billing))
-    billing.create_order.assert_called_once_with(10, "synthetic_user", "m3")
+    billing.create_order.assert_not_called()
     assert "499" in item.callback_query.edit_message_text.call_args.args[0]
+    keyboard = item.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+    assert keyboard.inline_keyboard[0][0].callback_data == "order:m3"
 
 
 def test_user_cannot_open_another_users_order(monkeypatch):
@@ -98,22 +104,43 @@ def test_user_cannot_open_another_users_order(monkeypatch):
 
 def test_cancel_pending_order(monkeypatch):
     order = pending()
-    billing = NS(get_order=Mock(return_value=order), cancel_order=Mock(return_value=order))
+    billing = NS(get_order=Mock(return_value=order),
+                 repository=NS(cancel_order=Mock(return_value=order)))
     item = run(invoke(monkeypatch, "bill_cancel:KV-SYNTHETIC", billing))
-    billing.cancel_order.assert_called_once_with("KV-SYNTHETIC", 10)
-    assert "отменён" in item.callback_query.edit_message_text.call_args.args[0]
+    billing.repository.cancel_order.assert_not_called()
+    keyboard = item.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+    assert keyboard.inline_keyboard[0][0].callback_data == "order_cancel_yes:KV-SYNTHETIC"
+    item = run(invoke(monkeypatch, "order_cancel_yes:KV-SYNTHETIC", billing))
+    billing.repository.cancel_order.assert_called_once_with("KV-SYNTHETIC")
+    assert "Заявка отменена" in item.callback_query.edit_message_text.call_args.args[0]
 
 
 def test_payment_is_safe_placeholder_and_completed_status_is_visible(monkeypatch):
     billing = NS(get_order=Mock(return_value=pending()))
     item = run(invoke(monkeypatch, "bill_pay:KV-SYNTHETIC", billing))
-    assert "провайдер ещё не" in item.callback_query.edit_message_text.call_args.args[0]
+    assert "платёжная ссылка в боте не подключена" in item.callback_query.edit_message_text.call_args.args[0]
     billing.get_order.return_value = pending(status=OrderStatus.COMPLETED)
     item = run(invoke(monkeypatch, "bill_pay:KV-SYNTHETIC", billing))
-    assert "выполнен" in item.callback_query.edit_message_text.call_args.args[0]
+    assert "Оплата подтверждена" in item.callback_query.edit_message_text.call_args.args[0]
 
 
 def test_bot_has_no_manual_payment_confirmation():
     source = __import__("pathlib").Path("src/bot.py").read_text(encoding="utf-8")
     assert "Я оплатил" not in source
     assert "mark_paid(" not in source
+
+
+def test_old_cancel_no_button_shows_current_completed_status(monkeypatch):
+    billing = NS(get_order=Mock(return_value=pending(status=OrderStatus.COMPLETED)))
+    item = run(invoke(monkeypatch, "order_cancel_no:KV-SYNTHETIC", billing))
+    assert "Оплата подтверждена" in item.callback_query.edit_message_text.call_args.args[0]
+
+
+def test_foreign_order_cannot_be_cancelled_or_changed(monkeypatch):
+    billing = NS(get_order=Mock(return_value=pending(tg_id=99)),
+                 repository=NS(cancel_order=Mock()))
+    for action in ("order_change_yes", "order_cancel_yes"):
+        item = run(invoke(monkeypatch, f"{action}:KV-SYNTHETIC", billing))
+        assert item.callback_query.answer.await_args.kwargs["show_alert"] is True
+        item.callback_query.edit_message_text.assert_not_awaited()
+    billing.repository.cancel_order.assert_not_called()
