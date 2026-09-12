@@ -37,7 +37,7 @@ try:
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
-    from .telegram_navigation import show_compound, show_photo, show_text, show_video
+    from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
@@ -54,7 +54,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
-    from telegram_navigation import show_compound, show_photo, show_text, show_video
+    from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 
 ENV_FILE = Path("/opt/karina-bot/.env")
@@ -604,24 +604,36 @@ def format_user_cabinet(bundle, mobile_traffic, traffic_unavailable=False, now_m
     return markdown_v2_escape("\n".join(lines))
 
 
-async def resolve_main_sticker(context):
+async def resolve_sticker(context, index):
     cache = (context.application.bot_data if getattr(context, "application", None)
              else getattr(context, "user_data", {}))
-    if cache.get("karina_main_sticker_file_id"):
-        return cache["karina_main_sticker_file_id"]
+    cache_key = f"karina_sticker_file_id:{int(index)}"
+    if cache.get(cache_key):
+        return cache[cache_key]
     try:
         # PTB 20.8's StickerSet model predates fields returned by the current
         # Bot API. _post returns the raw result dict before model conversion.
         result = await context.bot._post("getStickerSet", data={"name": "KarinaVPN"})
         stickers = result.get("stickers") if isinstance(result, dict) else None
-        file_id = stickers[0].get("file_id") if stickers and isinstance(stickers[0], dict) else None
+        sticker = stickers[index] if isinstance(stickers, list) and len(stickers) > index else None
+        file_id = sticker.get("file_id") if isinstance(sticker, dict) else None
         if not isinstance(file_id, str) or not file_id:
-            raise ValueError("getStickerSet result has no first sticker file_id")
-        cache["karina_main_sticker_file_id"] = file_id
+            raise ValueError(f"getStickerSet result has no sticker file_id at index {index}")
+        cache[cache_key] = file_id
         return file_id
     except Exception:
-        LOGGER.warning("Unable to resolve first sticker from KarinaVPN", exc_info=True)
+        LOGGER.warning(
+            "Unable to resolve KarinaVPN sticker at index %s", index, exc_info=True,
+        )
         return None
+
+
+async def resolve_main_sticker(context):
+    return await resolve_sticker(context, 0)
+
+
+async def resolve_connection_sticker(context):
+    return await resolve_sticker(context, 8)
 
 
 async def render_client_home(update, email, context=None):
@@ -1900,7 +1912,11 @@ async def callbacks(
             page = service.reissue_bundle_connection(email)
             mobile_url = service.get_mobile_subscription_url(email)
             text, keyboard = connection_view(page, mobile_url)
-            await show_text(update, context, text, reply_markup=keyboard)
+            sticker = await resolve_connection_sticker(context)
+            await show_compound(
+                update, context, screen_key="connection", sticker=sticker,
+                text=text, reply_markup=keyboard,
+            )
         except EXPECTED_SERVICE_ERRORS as exc:
             await show_text(update, context, safe_user_error(exc))
         return
@@ -1911,6 +1927,7 @@ async def callbacks(
             qr = page[:-5] + ".png" if page.endswith(".html") else None
             if not qr:
                 raise ClientServiceError("QR-код временно недоступен")
+            context.user_data["connect_media_parent"] = "client_connect"
             await show_photo(
                 update, context, qr,
                 caption="📷 QR-код подключения\n\nОткрой Happ → добавление подписки → сканирование QR.",
@@ -1930,6 +1947,7 @@ async def callbacks(
 
     if re.fullmatch(r"platform:(android|ios|windows|macos)", data):
         text, keyboard = platform_view(data.split(":", 1)[1], CUSTOMER_CONFIG)
+        context.user_data["connect_media_parent"] = "connect_help"
         await show_text(update, context, text, reply_markup=keyboard)
         return
 
@@ -1937,6 +1955,9 @@ async def callbacks(
         file_id = getattr(CUSTOMER_CONFIG, "connect_video_file_id", None)
         local_video = getattr(CUSTOMER_CONFIG, "connect_video_path", None)
         video = local_video if local_video and Path(local_video).is_file() else file_id
+        screen = current_screen(context) or {}
+        back_callback = ("client_connect" if screen.get("screen_key") == "connection"
+                         else context.user_data.get("connect_media_parent", "connect_help"))
         if video:
             try:
                 await show_video(
@@ -1944,7 +1965,7 @@ async def callbacks(
                     caption="🎬 Как подключить Карина VPN\n\nВесь процесс занимает меньше минуты.",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("🔑 Получить подключение", callback_data="client_connect")
-                    ], [InlineKeyboardButton("← Назад", callback_data="connect_help")]]),
+                    ], [InlineKeyboardButton("← Назад", callback_data=back_callback)]]),
                 )
                 return
             except Exception:

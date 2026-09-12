@@ -62,10 +62,14 @@ def test_tariff_marketing_is_derived(code, monthly, saving):
 
 
 def test_connection_and_platform_navigation_hide_missing_optional_urls():
-    _, connection = connection_view(
+    text, connection = connection_view(
         "https://connect.example.test/user.html", "https://sub.example.test/mobile",
     )
     assert callbacks(connection) == ["client_qr", "connect_video", "client_home"]
+    assert "ПОДКЛЮЧЕНИЕ ГОТОВО • Карина VPN" in text
+    assert "двойной QR" not in text
+    assert any(getattr(button, "url", None) == "https://connect.example.test/user.html"
+               for row in connection.inline_keyboard for button in row)
     assert any(getattr(button, "url", None) == "https://sub.example.test/mobile"
                for row in connection.inline_keyboard for button in row)
     _, choice = platform_choice_view()

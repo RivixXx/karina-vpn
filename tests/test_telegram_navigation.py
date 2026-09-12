@@ -82,3 +82,55 @@ def test_compound_delete_failure_is_safe():
     run(show_compound(update, context, screen_key="main", sticker="file-id", text="cabinet"))
     run(show_text(update, context, "devices"))
     assert context.bot.send_message.await_count == 2
+
+
+def test_main_to_connection_replaces_both_compound_messages():
+    update, context = fixture()
+    context.bot.send_sticker.side_effect = [NS(message_id=14), NS(message_id=24)]
+    context.bot.send_message.side_effect = [NS(message_id=11), NS(message_id=21)]
+    run(show_compound(update, context, screen_key="main", sticker="main", text="cabinet"))
+    update.callback_query.message.message_id = 11
+    run(show_compound(
+        update, context, screen_key="connection", sticker="connection", text="links",
+    ))
+    deleted = [item.kwargs["message_id"] for item in context.bot.delete_message.await_args_list]
+    assert deleted == [10, 14, 11]
+    assert current_screen(context)["screen_key"] == "connection"
+    assert current_screen(context)["message_ids"] == [24, 21]
+
+
+@pytest.mark.parametrize("media", ["photo", "video"])
+def test_connection_media_back_recreates_one_connection_compound(media):
+    update, context = fixture()
+    run(show_compound(
+        update, context, screen_key="connection", sticker="connection", text="links",
+    ))
+    update.callback_query.message.message_id = 11
+    if media == "photo":
+        run(show_photo(update, context, "qr.png"))
+        media_id = 12
+    else:
+        run(show_video(update, context, "video.mp4"))
+        media_id = 13
+    update.callback_query.message.message_id = media_id
+    context.bot.send_sticker.return_value = NS(message_id=24)
+    context.bot.send_message.return_value = NS(message_id=21)
+    run(show_compound(
+        update, context, screen_key="connection", sticker="connection", text="links",
+    ))
+    assert current_screen(context)["screen_key"] == "connection"
+    assert current_screen(context)["message_ids"] == [24, 21]
+    assert context.bot.send_sticker.await_count == 2
+
+
+def test_repeated_connection_open_refreshes_without_duplicate_sticker():
+    update, context = fixture()
+    run(show_compound(
+        update, context, screen_key="connection", sticker="connection", text="links",
+    ))
+    update.callback_query.message.message_id = 11
+    run(show_compound(
+        update, context, screen_key="connection", sticker="connection", text="fresh links",
+    ))
+    context.bot.send_sticker.assert_awaited_once()
+    context.bot.send_message.assert_awaited_once()

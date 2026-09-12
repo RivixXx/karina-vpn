@@ -64,7 +64,7 @@ def bot(source_functions, local_db):
         "render_membership_gate", "render_membership_error", "format_user_cabinet",
         "render_tariffs", "send_menu_animation", "welcome_view",
         "pending_request_view",
-        "resolve_main_sticker",
+        "resolve_sticker", "resolve_main_sticker", "resolve_connection_sticker",
     }
 
     def connect():
@@ -110,6 +110,7 @@ def bot(source_functions, local_db):
         show_photo=_show_photo,
         show_video=_show_video,
         show_compound=_show_compound,
+        current_screen=lambda context: context.user_data.get("karina_ui_screen"),
     )
     functions["_service"] = service
     return functions
@@ -396,6 +397,27 @@ def test_main_sticker_resolves_first_item_and_caches_file_id(bot):
     assert ".get_sticker_set" not in resolver and "StickerSet.de_json" not in resolver
 
 
+def test_connection_sticker_resolves_ninth_item_with_separate_cache(bot):
+    api = NS(_post=AsyncMock(return_value={
+        "stickers": [{"file_id": f"sticker-{index}"} for index in range(9)],
+    }))
+    context = NS(bot=api, user_data={})
+    assert run(bot["resolve_main_sticker"](context)) == "sticker-0"
+    assert run(bot["resolve_connection_sticker"](context)) == "sticker-8"
+    assert run(bot["resolve_connection_sticker"](context)) == "sticker-8"
+    assert api._post.await_count == 2
+
+
+def test_client_connect_uses_connection_compound_and_ninth_sticker(bot):
+    api = NS(_post=AsyncMock(return_value={
+        "stickers": [{"file_id": f"sticker-{index}"} for index in range(9)],
+    }))
+    context = NS(bot=api, user_data={})
+    invoke(bot, "client_connect", context=context, user=2)
+    assert context.user_data["compound_screen"]["screen_key"] == "connection"
+    assert context.user_data["compound_screen"]["sticker"] == "sticker-8"
+
+
 def test_main_sticker_failure_returns_none_without_breaking_cabinet(bot):
     api = NS(_post=AsyncMock(side_effect=RuntimeError("telegram")))
     assert run(bot["resolve_main_sticker"](NS(bot=api, user_data={}))) is None
@@ -407,3 +429,33 @@ def test_main_sticker_failure_returns_none_without_breaking_cabinet(bot):
 def test_main_sticker_malformed_raw_result_falls_back(bot, result):
     api = NS(_post=AsyncMock(return_value=result))
     assert run(bot["resolve_main_sticker"](NS(bot=api, user_data={}))) is None
+
+
+def test_missing_ninth_sticker_still_renders_connection_menu(bot):
+    api = NS(_post=AsyncMock(return_value={"stickers": [{"file_id": "main"}]}))
+    context = NS(bot=api, user_data={})
+    invoke(bot, "client_connect", context=context, user=2)
+    assert context.user_data["compound_screen"]["screen_key"] == "connection"
+    assert context.user_data["compound_screen"]["sticker"] is None
+
+
+def test_qr_back_targets_connection_screen(bot):
+    api = NS(send_photo=AsyncMock())
+    context = NS(bot=api, user_data={})
+    invoke(bot, "client_qr", context=context, user=2)
+    markup = api.send_photo.await_args.kwargs["reply_markup"]
+    assert markup[-1][0].callback_data == "client_connect"
+
+
+def test_video_back_from_connection_targets_connection_screen(bot):
+    api = NS(send_video=AsyncMock())
+    context = NS(
+        bot=api,
+        user_data={"karina_ui_screen": {"screen_key": "connection"}},
+    )
+    bot["CUSTOMER_CONFIG"] = NS(
+        connect_video_file_id="telegram-video", connect_video_path=None,
+    )
+    invoke(bot, "connect_video", context=context, user=2)
+    markup = api.send_video.await_args.kwargs["reply_markup"]
+    assert markup[-1][0].callback_data == "client_connect"
