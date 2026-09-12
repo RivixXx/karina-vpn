@@ -422,21 +422,78 @@ def test_days_validation(config, tmp_path, days):
 def test_create_mobile_bundle(config, tmp_path):
     config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
                                 "mobile_inbound_id": 5,
+                                "mobile_inbound_ids": (5, 6),
                                 "mobile_traffic_bytes": 53687091200})
     service, xui = make_service(config, tmp_path, issue=lambda sub_id: f"page/{sub_id}")
     result = service.create_client_bundle("Mikhail")
     primary, mobile = result.bundle.primary, result.bundle.mobile
     assert primary.inbound_ids == (2, 3, 4) and primary.total_traffic_bytes == 0
-    assert mobile.inbound_ids == (5,)
+    assert mobile.inbound_ids == (5, 6)
     assert mobile.total_traffic_bytes == 53687091200
     assert primary.device_limit == 2 and mobile.device_limit == 0
     assert primary.sub_id != mobile.sub_id
+    assert xui.clients["Mikhail"]["client"]["id"] != xui.clients["Mikhail__mobile"]["client"]["id"]
     assert primary.expiry_time_ms == mobile.expiry_time_ms
     link = xui.clients["Mikhail"]["externalLinks"][0]
     assert link == {"kind": "subscription",
                     "value": config.sub_base + "/" + mobile.sub_id,
                     "remark": "karina-mobile"}
     assert "localhost" not in link["value"] and "vless://" not in link["value"]
+
+
+def test_complete_bundle_creation_is_idempotent(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_ids": (5, 6),
+                                "mobile_traffic_bytes": 53687091200})
+    issued = []
+    service, xui = make_service(
+        config, tmp_path, issue=lambda sub_id: issued.append(sub_id) or f"page/{sub_id}",
+    )
+    first = service.create_client_bundle("Mikhail")
+    before = deepcopy(xui.clients)
+    external_updates = len(xui.external_updates)
+    second = service.create_client_bundle("Mikhail")
+    assert xui.clients == before
+    assert len(xui.external_updates) == external_updates
+    assert second.bundle == first.bundle
+    assert issued == [first.bundle.primary.sub_id, first.bundle.primary.sub_id]
+    assert service.get_mobile_subscription_url("Mikhail") == (
+        config.sub_base + "/" + first.bundle.mobile.sub_id
+    )
+
+
+def test_bundle_collision_and_partial_legacy_state_are_not_mutated(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_ids": (5, 6)})
+    primary = raw_client("Mikhail", inbounds=(2, 3, 4))
+    service, xui = make_service(config, tmp_path, {"Mikhail": primary}, issue=lambda value: value)
+    before = deepcopy(xui.clients)
+    with pytest.raises(ClientAlreadyExistsError):
+        service.create_client_bundle("Mikhail")
+    assert xui.clients == before and not xui.updated and not xui.deleted
+
+    mobile = raw_client("Mikhail__mobile", inbounds=(5,), traffic=config.mobile_traffic_bytes)
+    service, xui = make_service(
+        config, tmp_path, {"Mikhail": primary, "Mikhail__mobile": mobile},
+        issue=lambda value: value,
+    )
+    before = deepcopy(xui.clients)
+    with pytest.raises(ReconciliationRequiredError):
+        service.create_client_bundle("Mikhail")
+    assert xui.clients == before and not xui.updated and not xui.deleted
+
+
+def test_two_mobile_inbounds_are_used_by_migration(config, tmp_path):
+    config = config.__class__(**{**config.__dict__, "primary_inbound_ids": (2, 3, 4),
+                                "mobile_inbound_ids": (5, 6),
+                                "mobile_traffic_bytes": 53687091200})
+    service, xui = make_service(config, tmp_path, {"Mikhail": raw_client(
+        "Mikhail", inbounds=(2, 3, 4, 5, 6))})
+    plan = service.plan_mobile_migration("Mikhail")
+    assert plan.needs_mobile_create and plan.needs_primary_detach
+    result = service.migrate_client_to_mobile_bundle("Mikhail")
+    assert result.mobile.inbound_ids == (5, 6)
+    assert xui.detached == [("Mikhail", (5, 6))]
 
 
 def test_migration_detaches_mobile_inbound_last(config, tmp_path):

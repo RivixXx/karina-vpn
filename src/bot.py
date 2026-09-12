@@ -1814,8 +1814,10 @@ async def callbacks(
 
     if data == "client_connect":
         try:
-            page = build_client_service().reissue_bundle_connection(email)
-            text, keyboard = connection_view(page)
+            service = build_client_service()
+            page = service.reissue_bundle_connection(email)
+            mobile_url = service.get_mobile_subscription_url(email)
+            text, keyboard = connection_view(page, mobile_url)
             await query.edit_message_text(text, reply_markup=keyboard)
         except EXPECTED_SERVICE_ERRORS as exc:
             await query.edit_message_text(safe_user_error(exc))

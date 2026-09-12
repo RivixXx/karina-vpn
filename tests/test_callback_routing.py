@@ -60,6 +60,7 @@ def bot(source_functions, local_db):
         get_bundle_devices=Mock(return_value=[]),
         ensure_connection=Mock(return_value="https://example.test/connect/fresh.html"),
         reissue_bundle_connection=Mock(return_value="https://example.test/connect/fresh.html"),
+        get_mobile_subscription_url=Mock(return_value="https://sub.example.test/mobile"),
         get_expiring=Mock(return_value=[]),
         delete_client=Mock(return_value=client()),
         delete_client_bundle=Mock(return_value=client()),
@@ -80,7 +81,7 @@ def bot(source_functions, local_db):
         MembershipCheckError=type("MembershipCheckError", (Exception,), {}),
         CUSTOMER_CONFIG=NS(menu_animation_file_id=None),
         tariff_list_view=lambda **kwargs: ("tariffs", []),
-        connection_view=lambda page: ("connection", []),
+        connection_view=lambda page, mobile=None: ("connection", []),
     )
     functions["_service"] = service
     return functions

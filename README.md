@@ -144,6 +144,7 @@ The implemented production configuration keys are:
 ```dotenv
 PRIMARY_INBOUND_IDS=2,3,4
 MOBILE_INBOUND_ID=5
+MOBILE_INBOUND_IDS=5,10
 MOBILE_TRAFFIC_GB=50
 CONNECT_DIR=/var/www/karina/connect
 NOTIFIER_TIMEZONE=Europe/Moscow
@@ -164,7 +165,9 @@ TELEGRAPH_WINDOWS_URL=
 TELEGRAPH_MACOS_URL=
 ```
 
-`INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
+`MOBILE_INBOUND_IDS` is the canonical list for the anti-blocking WebSocket/TLS
+and XHTTP/CDN inbounds. `MOBILE_INBOUND_ID` remains a single-inbound fallback
+for existing installations. `INBOUND_IDS` remains supported for compatibility. Do not store `config.env`,
 `.env`, database files, tokens, or credentials in Git.
 
 Media and help links are optional. To obtain a reusable Telegram `file_id`, an

@@ -18,6 +18,7 @@ class KarinaConfig:
     default_hwid_limit: int
     primary_inbound_ids: tuple[int, ...] = ()
     mobile_inbound_id: int = 5
+    mobile_inbound_ids: tuple[int, ...] = ()
     mobile_traffic_bytes: int = 50 * 1024 ** 3
     connect_dir: Path = Path("/var/www/karina/connect")
     notifier_timezone: str = "Europe/Moscow"
@@ -81,14 +82,22 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         raise ConfigError("INBOUND_IDS должен содержать только положительные числа")
     try:
         default_hwid_limit = int(values.get("DEFAULT_HWID_LIMIT", "2"))
-        mobile_inbound_id = int(values.get("MOBILE_INBOUND_ID", "5"))
+        if values.get("MOBILE_INBOUND_IDS", "").strip():
+            mobile_inbound_ids = tuple(
+                int(item.strip()) for item in values["MOBILE_INBOUND_IDS"].split(",")
+                if item.strip()
+            )
+            mobile_inbound_id = mobile_inbound_ids[0] if mobile_inbound_ids else 0
+        else:
+            mobile_inbound_id = int(values.get("MOBILE_INBOUND_ID", "5"))
+            mobile_inbound_ids = (mobile_inbound_id,)
         mobile_traffic_gb = int(values.get("MOBILE_TRAFFIC_GB", "50"))
         if "PRIMARY_INBOUND_IDS" in values:
             primary_inbound_ids = tuple(int(item.strip()) for item in
                                         values["PRIMARY_INBOUND_IDS"].split(",") if item.strip())
         else:
             primary_inbound_ids = tuple(value for value in inbound_ids
-                                        if value != mobile_inbound_id)
+                                        if value not in mobile_inbound_ids)
     except ValueError as exc:
         raise ConfigError("DEFAULT_HWID_LIMIT должен быть целым числом") from exc
     if default_hwid_limit < 0:
@@ -97,8 +106,10 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
     if (not primary_inbound_ids or any(value <= 0 for value in primary_inbound_ids)
             or len(set(primary_inbound_ids)) != len(primary_inbound_ids)):
         raise ConfigError("invalid PRIMARY_INBOUND_IDS")
-    if mobile_inbound_id <= 0 or mobile_inbound_id in primary_inbound_ids:
-        raise ConfigError("invalid MOBILE_INBOUND_ID")
+    if (not mobile_inbound_ids or any(value <= 0 for value in mobile_inbound_ids)
+            or len(set(mobile_inbound_ids)) != len(mobile_inbound_ids)
+            or set(mobile_inbound_ids) & set(primary_inbound_ids)):
+        raise ConfigError("invalid MOBILE_INBOUND_IDS")
     if mobile_traffic_gb <= 0:
         raise ConfigError("invalid MOBILE_TRAFFIC_GB")
     membership_mode = values.get("REQUIRED_MEMBERSHIP_MODE", "new_users")
@@ -125,6 +136,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         default_hwid_limit=default_hwid_limit,
         primary_inbound_ids=primary_inbound_ids,
         mobile_inbound_id=mobile_inbound_id,
+        mobile_inbound_ids=mobile_inbound_ids,
         mobile_traffic_bytes=mobile_traffic_gb * 1024 ** 3,
         connect_dir=Path(values.get("CONNECT_DIR", "/var/www/karina/connect")),
         notifier_timezone=values.get("NOTIFIER_TIMEZONE", "Europe/Moscow"),

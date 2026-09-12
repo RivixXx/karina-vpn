@@ -85,6 +85,25 @@ def test_mobile_config(tmp_path):
     assert config.mobile_traffic_bytes == 53687091200
 
 
+def test_multiple_mobile_inbounds_and_legacy_fallback(tmp_path):
+    config = load_config(write_config(
+        tmp_path, PRIMARY_INBOUND_IDS="2,3,4", MOBILE_INBOUND_IDS="5,6",
+    ))
+    assert config.mobile_inbound_ids == (5, 6)
+    assert config.mobile_inbound_id == 5
+    legacy = load_config(write_config(
+        tmp_path, PRIMARY_INBOUND_IDS="2,3,4", MOBILE_INBOUND_ID="7",
+    ))
+    assert legacy.mobile_inbound_ids == (7,)
+
+
+@pytest.mark.parametrize("value", ["", "5,5", "0,5", "x,5"])
+def test_invalid_multiple_mobile_inbounds(tmp_path, value):
+    with pytest.raises(ConfigError):
+        load_config(write_config(tmp_path, PRIMARY_INBOUND_IDS="2,3,4",
+                                 MOBILE_INBOUND_IDS=value, MOBILE_INBOUND_ID=""))
+
+
 @pytest.mark.parametrize("overrides", [
     {"PRIMARY_INBOUND_IDS": "2,2,4"},
     {"PRIMARY_INBOUND_IDS": "2,3,5", "MOBILE_INBOUND_ID": "5"},

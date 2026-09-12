@@ -62,8 +62,12 @@ def test_tariff_marketing_is_derived(code, monthly, saving):
 
 
 def test_connection_and_platform_navigation_hide_missing_optional_urls():
-    _, connection = connection_view("https://connect.example.test/user.html")
+    _, connection = connection_view(
+        "https://connect.example.test/user.html", "https://sub.example.test/mobile",
+    )
     assert callbacks(connection) == ["client_qr", "connect_video", "client_home"]
+    assert any(getattr(button, "url", None) == "https://sub.example.test/mobile"
+               for row in connection.inline_keyboard for button in row)
     _, choice = platform_choice_view()
     assert set(callbacks(choice)) >= {"platform:android", "platform:ios", "platform:windows", "platform:macos"}
     config = NS(happ_android_url=None, telegraph_android_url=None,
