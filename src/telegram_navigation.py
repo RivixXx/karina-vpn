@@ -61,7 +61,9 @@ def current_screen(context):
 
 async def show_text(update, context, text, *, reply_markup=None, parse_mode=None):
     query = getattr(update, "callback_query", None)
-    if query and _current_kind(update, context) == "text":
+    screen = current_screen(context) or {}
+    if (query and _current_kind(update, context) == "text"
+            and screen.get("content_type") != "compound"):
         try:
             message = await query.edit_message_text(
                 text, reply_markup=reply_markup, parse_mode=parse_mode,

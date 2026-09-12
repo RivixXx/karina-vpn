@@ -392,6 +392,63 @@ def format_devices(devices: list[DeviceInfo], limit: int) -> str:
     return "\n".join(lines).rstrip()
 
 
+def device_display_name(device: DeviceInfo, position: int) -> str:
+    return device.model or device.os_name or f"устройство {position}"
+
+
+def device_slots_bar(used: int, limit: int) -> str:
+    if not limit:
+        return ""
+    segments = min(limit, 10)
+    filled = min(segments, (min(used, limit) * segments + limit - 1) // limit)
+    return "[" + "■" * filled + "□" * (segments - filled) + "]"
+
+
+def format_client_devices(devices: list[DeviceInfo], limit: int) -> str:
+    limit_text = str(limit) if limit else "∞"
+    lines = [
+        "📱 МОИ УСТРОЙСТВА • Карина VPN",
+        "━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        f"Занято слотов: {len(devices)} из {limit_text}",
+    ]
+    bar = device_slots_bar(len(devices), limit)
+    if bar:
+        lines.append(bar)
+    lines.append("")
+    if not devices:
+        lines.extend(["Подключённых устройств пока нет.", ""])
+    for position, device in enumerate(devices, 1):
+        name = device_display_name(device, position)
+        icon = "🍏" if "ios" in device.os_name.lower() else "💻"
+        lines.append(f"{position}. {icon} {name}")
+        os_text = " ".join(value for value in (device.os_name, device.os_version) if value)
+        if os_text:
+            lines.append(f"   ОС: {os_text}")
+        if device.user_agent:
+            lines.append(f"   Приложение: {device.user_agent}")
+        if device.last_seen_ms:
+            seen = datetime.fromtimestamp(
+                device.last_seen_ms / 1000, tz=MOSCOW_TIMEZONE,
+            ).strftime("%d.%m.%Y %H:%M")
+            lines.append(f"   Последняя активность: {seen}")
+        lines.append("")
+    if limit:
+        free = max(limit - len(devices), 0)
+        lines.extend([f"Свободно слотов: {free}", ""])
+        if not free:
+            lines.extend([
+                "⚠️ Все доступные слоты заняты.",
+                "Отвяжите одно из устройств, чтобы подключить новое.",
+                "",
+            ])
+    lines.extend([
+        "💡 Вы можете отвязать конкретное устройство",
+        "или сбросить все активные сессии сразу.",
+    ])
+    return "\n".join(lines)
+
+
 def format_traffic(traffic: TrafficInfo) -> str:
     lines = [f"Использовано: {bytes_to_human(traffic.used_bytes)}"]
     if traffic.limit_bytes:
@@ -684,39 +741,37 @@ async def client_devices(update, email, context=None):
         service = build_client_service()
         bundle = service.get_client_bundle(email)
         if bundle is None:
-            text = "❌ Подписка не найдена\\."
+            text = "❌ Подписка не найдена."
+            devices, limit = [], 0
         else:
-            count = len(service.get_bundle_devices(email))
-            text = "📱 *Мои устройства*\n\n" + markdown_v2_escape(
-                f"Используется: {count} из {bundle.primary.device_limit or '∞'}\n\n"
-                "Если вы переустановили приложение или сменили телефон, "
-                "можно сбросить список устройств.")
+            devices = service.get_bundle_devices(email)
+            limit = bundle.primary.device_limit
+            text = format_client_devices(devices, limit)
     except EXPECTED_SERVICE_ERRORS as exc:
-        text = f"❌ {markdown_v2_escape(safe_user_error(exc))}"
+        text, devices, limit = f"❌ {safe_user_error(exc)}", [], 0
 
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "🏠 Мой профиль",
-                    callback_data="client_home",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "♻️ Сбросить устройства",
-                    callback_data="client_reset_devices",
-                )
-            ],
-        ]
-    )
+    rows = [[InlineKeyboardButton(
+        f"❌ Отвязать {device_display_name(device, position)}",
+        callback_data=f"client_device_unlink:{device.id}",
+    )] for position, device in enumerate(devices, 1)]
+    if not limit or len(devices) < limit:
+        rows.append([InlineKeyboardButton("＋ Добавить устройство", callback_data="client_connect")])
+    rows.extend([
+        [InlineKeyboardButton("🔄 Обновить", callback_data="client_devices")],
+        [InlineKeyboardButton("🔄 Сбросить все устройства", callback_data="client_reset_devices")],
+        [InlineKeyboardButton("← Назад", callback_data="client_home")],
+    ])
+    keyboard = InlineKeyboardMarkup(rows)
 
     if context is not None:
-        await show_text(update, context, text, reply_markup=keyboard,
-                        parse_mode=ParseMode.MARKDOWN_V2)
+        sticker = await resolve_sticker(context, 6)
+        await show_compound(
+            update, context, screen_key="devices", sticker=sticker,
+            text=text, reply_markup=keyboard,
+        )
     else:
         await update.callback_query.edit_message_text(
-            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2,
+            text, reply_markup=keyboard,
         )
 
 
@@ -1994,13 +2049,53 @@ async def callbacks(
         )
         return
 
+    unlink_match = re.fullmatch(r"client_device_unlink:([1-9][0-9]{0,18})", data)
+    if unlink_match:
+        device_id = int(unlink_match[1])
+        context.user_data["client_device_unlink"] = {
+            "tg_id": user.id, "device_id": device_id, "updated_at": time.time(),
+        }
+        await show_text(
+            update, context,
+            "⚠️ ОТВЯЗАТЬ УСТРОЙСТВО?\n\n"
+            "Устройство потребуется подключить заново.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ Да, отвязать",
+                    callback_data=f"client_device_unlink_confirm:{device_id}",
+                )],
+                [InlineKeyboardButton("← Отмена", callback_data="client_devices")],
+            ]),
+        )
+        return
+
+    unlink_confirm = re.fullmatch(
+        r"client_device_unlink_confirm:([1-9][0-9]{0,18})", data,
+    )
+    if unlink_confirm:
+        device_id = int(unlink_confirm[1])
+        state = context.user_data.pop("client_device_unlink", {})
+        if (state.get("tg_id") != user.id or state.get("device_id") != device_id
+                or time.time() - state.get("updated_at", 0) > ACTION_TIMEOUT_SECONDS):
+            await show_text(update, context, "Подтверждение устарело.")
+            return
+        try:
+            build_client_service().remove_bundle_device(email, device_id)
+            await client_devices(update, email, context)
+        except EXPECTED_SERVICE_ERRORS as exc:
+            await show_text(update, context, safe_user_error(exc))
+        return
+
     if data == "client_reset_devices":
         context.user_data["client_device_reset"] = {"tg_id": user.id, "updated_at": time.time()}
-        await query.edit_message_text(
-            "⚠️ Сбросить устройства?\n\nПосле сброса VPN потребуется повторно подключить на устройствах.",
+        await show_text(
+            update, context,
+            "⚠️ СБРОСИТЬ ВСЕ УСТРОЙСТВА?\n\n"
+            "Все текущие привязки устройств будут удалены.\n"
+            "После этого устройства потребуется подключить заново.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Да, сбросить", callback_data="client_reset_confirm")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="client_devices")],
+                [InlineKeyboardButton("← Отмена", callback_data="client_devices")],
             ]),
         )
         return
@@ -2012,10 +2107,9 @@ async def callbacks(
             return
         try:
             build_client_service().reset_bundle_devices(email)
-            await query.edit_message_text("✅ Устройства сброшены.", reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⬅️ Мой профиль", callback_data="client_home")]]))
+            await client_devices(update, email, context)
         except EXPECTED_SERVICE_ERRORS as exc:
-            await query.edit_message_text(markdown_v2_escape(safe_user_error(exc)))
+            await show_text(update, context, safe_user_error(exc))
         return
 
     if data == "client_traffic":

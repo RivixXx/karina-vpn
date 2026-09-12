@@ -7,10 +7,13 @@ def load_formatters(source_functions):
     names = {
         "markdown_v2_escape", "bytes_to_human", "traffic_limit_text", "status_text",
         "format_client_profile", "format_devices", "format_traffic", "safe_user_error",
-        "format_user_cabinet",
+        "format_user_cabinet", "device_display_name", "device_slots_bar",
+        "format_client_devices",
     }
     return source_functions("bot.py", names, _markdown_v2_escape=markdown_v2_escape,
-                            LOGGER=type("Log", (), {"warning": lambda *a, **k: None})())
+                            LOGGER=type("Log", (), {"warning": lambda *a, **k: None})(),
+                            datetime=__import__("datetime").datetime,
+                            MOSCOW_TIMEZONE=__import__("datetime").timezone.utc)
 
 
 def test_profile_formatter_uses_typed_client(source_functions):
@@ -30,6 +33,38 @@ def test_devices_formatter(source_functions):
     text = functions["format_devices"]([device], 2)
     assert "Использовано: 1 / 2" in text
     assert "Phone" in text and "Android 15" in text and "Happ" in text
+
+
+@pytest.mark.parametrize(("used", "limit", "expected"), [
+    (0, 5, "[□□□□□]"), (2, 5, "[■■□□□]"), (5, 5, "[■■■■■]"),
+    (6, 20, "[■■■□□□□□□□]"),
+])
+def test_device_slots_progress_bar(source_functions, used, limit, expected):
+    assert load_formatters(source_functions)["device_slots_bar"](used, limit) == expected
+
+
+def test_customer_devices_render_real_fields_and_unknown_name(source_functions):
+    functions = load_formatters(source_functions)
+    devices = [
+        DeviceInfo(7, "Phone", "Android", "15", "Happ", 1, 2),
+        DeviceInfo(8, "", "", "", "", 0, 0),
+    ]
+    text = functions["format_client_devices"](devices, 5)
+    assert "Занято слотов: 2 из 5" in text
+    assert "Свободно слотов: 3" in text
+    assert "Phone" in text and "Android 15" in text and "Happ" in text
+    assert "устройство 2" in text
+    assert "ID:" not in text
+
+
+def test_customer_devices_full_and_empty_states(source_functions):
+    functions = load_formatters(source_functions)
+    empty = functions["format_client_devices"]([], 5)
+    assert "Подключённых устройств пока нет" in empty and "Свободно слотов: 5" in empty
+    full = functions["format_client_devices"]([
+        DeviceInfo(index, f"Device {index}", "", "", "", 0, 0) for index in range(1, 6)
+    ], 5)
+    assert "Все доступные слоты заняты" in full and "Свободно слотов: 0" in full
 
 
 def test_traffic_formatter(source_functions):

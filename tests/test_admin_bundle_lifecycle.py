@@ -385,12 +385,12 @@ def test_dynamic_markdown_formatters_escape_values():
 def test_client_device_and_traffic_renders_escape_dynamic_values(admin):
     special = "Test-User_[device]+foo(bar)=x!{value}|"
     admin.get_client.return_value = client()
-    admin.get_devices.return_value = [DeviceInfo(1, special, special, special, special, 0, 0)]
+    admin.get_bundle_devices.return_value = [DeviceInfo(1, special, special, special, special, 0, 0)]
     devices_update = update("client_devices")
     run(bot.client_devices(devices_update, "demo"))
     device_call = devices_update.callback_query.edit_message_text.call_args
-    assert device_call.kwargs["parse_mode"] == bot.ParseMode.MARKDOWN_V2
-    assert_valid_markdown_v2(device_call.args[0])
+    assert "parse_mode" not in device_call.kwargs
+    assert special in device_call.args[0]
 
     admin.get_traffic.return_value = TrafficInfo(1024, 50 * 1024 ** 3, 50 * 1024 ** 3 - 1024, 0.1)
     traffic_update = update("client_traffic")

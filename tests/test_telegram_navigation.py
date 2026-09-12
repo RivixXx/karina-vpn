@@ -134,3 +134,13 @@ def test_repeated_connection_open_refreshes_without_duplicate_sticker():
     ))
     context.bot.send_sticker.assert_awaited_once()
     context.bot.send_message.assert_awaited_once()
+
+
+def test_compound_to_confirmation_text_removes_sticker_and_menu():
+    update, context = fixture()
+    run(show_compound(update, context, screen_key="devices", sticker="help", text="devices"))
+    update.callback_query.message.message_id = 11
+    run(show_text(update, context, "confirm"))
+    deleted = [item.kwargs["message_id"] for item in context.bot.delete_message.await_args_list]
+    assert deleted == [10, 14, 11]
+    context.bot.send_message.assert_awaited()

@@ -65,6 +65,7 @@ def bot(source_functions, local_db):
         "render_tariffs", "send_menu_animation", "welcome_view",
         "pending_request_view",
         "resolve_sticker", "resolve_main_sticker", "resolve_connection_sticker",
+        "device_display_name", "device_slots_bar", "format_client_devices", "client_devices",
     }
 
     def connect():
@@ -87,6 +88,7 @@ def bot(source_functions, local_db):
         delete_client=Mock(return_value=client()),
         delete_client_bundle=Mock(return_value=client()),
         reset_bundle_devices=Mock(),
+        remove_bundle_device=Mock(),
     )
     functions = source_functions(
         "bot.py", names, db_connect=connect, closing=closing, sqlite3=sqlite3,
@@ -111,6 +113,8 @@ def bot(source_functions, local_db):
         show_video=_show_video,
         show_compound=_show_compound,
         current_screen=lambda context: context.user_data.get("karina_ui_screen"),
+        datetime=__import__("datetime").datetime,
+        MOSCOW_TIMEZONE=__import__("datetime").timezone.utc,
     )
     functions["_service"] = service
     return functions
@@ -360,7 +364,7 @@ def test_membership_disabled_and_linked_new_user_policy_bypass(bot):
 
 
 def test_client_connect_and_reset_are_bound_to_own_email(bot):
-    context = NS(user_data={})
+    context = NS(user_data={}, bot=NS(_post=AsyncMock(return_value={})))
     invoke(bot, "client_connect", context=context, user=2)
     bot["_service"].reissue_bundle_connection.assert_called_once_with("demo_other")
     invoke(bot, "client_reset_devices", context=context, user=2)
@@ -459,3 +463,59 @@ def test_video_back_from_connection_targets_connection_screen(bot):
     invoke(bot, "connect_video", context=context, user=2)
     markup = api.send_video.await_args.kwargs["reply_markup"]
     assert markup[-1][0].callback_data == "client_connect"
+
+
+def test_devices_use_seventh_sticker_and_existing_action_callbacks(bot):
+    bot["_service"].get_bundle_devices.return_value = [
+        NS(id=7, model="Phone", os_name="Android", os_version="15",
+           user_agent="Happ", first_seen_ms=0, last_seen_ms=0),
+    ]
+    api = NS(_post=AsyncMock(return_value={
+        "stickers": [{"file_id": f"sticker-{index}"} for index in range(9)],
+    }))
+    context = NS(bot=api, user_data={})
+    invoke(bot, "client_devices", context=context, user=2)
+    screen = context.user_data["compound_screen"]
+    assert screen["screen_key"] == "devices" and screen["sticker"] == "sticker-6"
+    callbacks = [button.callback_data for row in screen["reply_markup"] for button in row]
+    assert callbacks == [
+        "client_device_unlink:7", "client_connect", "client_devices",
+        "client_reset_devices", "client_home",
+    ]
+
+
+def test_devices_resolver_failure_still_renders_text_menu(bot):
+    api = NS(_post=AsyncMock(side_effect=RuntimeError("telegram")))
+    context = NS(bot=api, user_data={})
+    invoke(bot, "client_devices", context=context, user=2)
+    screen = context.user_data["compound_screen"]
+    assert screen["screen_key"] == "devices" and screen["sticker"] is None
+
+
+def test_full_device_slots_hide_add_device(bot):
+    primary = client("demo_other")
+    primary = primary.__class__(**{**primary.__dict__, "device_limit": 1})
+    bot["_service"].get_client_bundle.side_effect = None
+    bot["_service"].get_client_bundle.return_value = NS(primary=primary, mobile=None)
+    bot["_service"].get_bundle_devices.return_value = [
+        NS(id=7, model="Phone", os_name="", os_version="", user_agent="",
+           first_seen_ms=0, last_seen_ms=0),
+    ]
+    context = NS(bot=NS(_post=AsyncMock(return_value={})), user_data={})
+    invoke(bot, "client_devices", context=context, user=2)
+    screen = context.user_data["compound_screen"]
+    callbacks = [button.callback_data for row in screen["reply_markup"] for button in row]
+    assert "client_connect" not in callbacks
+    assert "Все доступные слоты заняты" in screen["text"]
+
+
+def test_customer_device_unlink_requires_confirmation_and_refreshes(bot):
+    context = NS(bot=NS(_post=AsyncMock(return_value={})), user_data={})
+    confirmation = invoke(bot, "client_device_unlink:7", context=context, user=2)
+    bot["_service"].remove_bundle_device.assert_not_called()
+    markup = confirmation.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+    assert markup[0][0].callback_data == "client_device_unlink_confirm:7"
+    assert markup[1][0].callback_data == "client_devices"
+    invoke(bot, "client_device_unlink_confirm:7", context=context, user=2)
+    bot["_service"].remove_bundle_device.assert_called_once_with("demo_other", 7)
+    assert context.user_data["compound_screen"]["screen_key"] == "devices"
