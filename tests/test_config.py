@@ -127,6 +127,23 @@ def test_membership_config_and_signed_chat_id(tmp_path):
     assert config.required_membership_mode == "new_users"
 
 
+def test_avatar_and_local_video_config(tmp_path):
+    config = load_config(write_config(
+        tmp_path, AVATAR_CHAT_ID="-100123", AVATAR_DIR="/srv/avatar",
+        AVATAR_STATE_FILE="/srv/state/avatar.json",
+        CONNECT_VIDEO_PATH="/srv/avatar/video_1.mp4",
+    ))
+    assert config.avatar_chat_id == -100123
+    assert config.avatar_dir == Path("/srv/avatar")
+    assert config.avatar_state_file == Path("/srv/state/avatar.json")
+    assert config.connect_video_path == Path("/srv/avatar/video_1.mp4")
+
+
+def test_invalid_avatar_chat_id_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match="AVATAR_CHAT_ID"):
+        load_config(write_config(tmp_path, AVATAR_CHAT_ID="not-a-chat"))
+
+
 @pytest.mark.parametrize("mode", ["invalid", "NEW_USERS", ""])
 def test_invalid_membership_mode(tmp_path, mode):
     with pytest.raises(ConfigError, match="REQUIRED_MEMBERSHIP_MODE"):

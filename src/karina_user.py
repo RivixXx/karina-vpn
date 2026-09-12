@@ -9,12 +9,12 @@ from pathlib import Path
 
 try:
     from .application import build_client_service
-    from .app_config import ConfigError
+    from .app_config import ConfigError, load_config
     from .integrations.xui import XUIClient, XUIError
     from .services import ClientService, ClientServiceError
 except ImportError:  # Direct execution from the src directory.
     from application import build_client_service
-    from app_config import ConfigError
+    from app_config import ConfigError, load_config
     from integrations.xui import XUIClient, XUIError
     from services import ClientService, ClientServiceError
 
@@ -366,6 +366,27 @@ def cmd_migrate_bundle_cohort(args):
         print(f"  {email}: {status}")
 
 
+def cmd_avatar_status(args):
+    if args:
+        die("usage: karina-user avatar-status")
+    try:
+        from .avatar_scheduler import TIMEZONE, load_state, select_avatar
+    except ImportError:
+        from avatar_scheduler import TIMEZONE, load_state, select_avatar
+    config = load_config(CONFIG)
+    current = datetime.now(TIMEZONE).date()
+    selected = select_avatar(current, config.avatar_dir)
+    state = load_state(config.avatar_state_file)
+    print(f"Current date: {current.isoformat()}")
+    print(f"Timezone: {TIMEZONE.key}")
+    print(f"Selected avatar: {selected.key or 'NONE'}")
+    print(f"File: {selected.path or 'missing'}")
+    print(f"Rule: {selected.rule}")
+    print(f"Bot update required: {'YES' if selected.key and state.get('bot') != selected.key else 'NO'}")
+    chat_required = bool(config.avatar_chat_id and selected.key and state.get('chat') != selected.key)
+    print(f"Chat update required: {'YES' if chat_required else 'NO'}")
+
+
 def usage():
     print(
         """
@@ -397,6 +418,7 @@ HWID / устройства:
   karina-user enable ИМЯ
   karina-user delete ИМЯ
   karina-user migrate-bundle-cohort --dry-run
+  karina-user avatar-status
 
 Примеры:
 
@@ -429,6 +451,7 @@ def main():
         "delete-confirmed": cmd_delete_confirmed,
         "migrate-mobile": cmd_migrate_mobile,
         "migrate-bundle-cohort": cmd_migrate_bundle_cohort,
+        "avatar-status": cmd_avatar_status,
     }
     handler = commands.get(sys.argv[1])
     if not handler:

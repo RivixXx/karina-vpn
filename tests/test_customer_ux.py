@@ -89,8 +89,9 @@ def test_platform_configured_urls_are_shown():
 
 
 @pytest.mark.parametrize("expiry,enabled,expected", [
-    (2_000_000_000_000, True, "🟢 VPN работает"), (0, True, "без ограничений"),
-    (1, True, "🔴 Подписка закончилась"), (2_000_000_000_000, False, "⛔ Подписка отключена"),
+    (2_000_000_000_000, True, "🟢 Статус: VPN работает"), (0, True, "без ограничений"),
+    (1, True, "🔴 Статус: Подписка закончилась"),
+    (2_000_000_000_000, False, "🔴 Статус: Подписка отключена"),
 ])
 def test_cabinet_subscription_states(expiry, enabled, expected):
     text = format_cabinet(bundle(expiry=expiry, enabled=enabled), None,
@@ -105,18 +106,31 @@ def test_cabinet_mobile_states_and_device_count_only():
     exhausted = format_cabinet(bundle(), TrafficInfo(50 * 1024 ** 3, 50 * 1024 ** 3,
                                                       0, 100), now_ms=1_000)
     missing = format_cabinet(ClientBundle(client(), None), None, now_ms=1_000)
-    assert "12.0 / 50 ГБ" in healthy and "Устройства: 2 из 5" in healthy
-    assert "лимит исчерпан" in exhausted
+    assert "12.0 ГБ / 50 ГБ" in healthy and "Подключено устройств: 2 из 5" in healthy
+    assert "76% свободно" in healthy and "24%" in healthy
+    assert "Лимит исчерпан" in exhausted
     assert "Не подключена" in missing
 
 
-def test_cabinet_optional_external_buttons():
+def test_branded_cabinet_contains_real_telegram_id_and_protection_state():
+    active = format_cabinet(bundle(), None, traffic_unavailable=True,
+                            now_ms=1_000, telegram_id=12345)
+    disabled = format_cabinet(bundle(enabled=False), None, traffic_unavailable=True,
+                              now_ms=1_000, telegram_id=12345)
+    assert "<code>12345</code>" in active
+    assert "🛡 Защита: Активна" in active
+    assert "🛡 Защита: Отключена" in disabled
+    assert "VLESS" not in active and "Локация" not in active
+
+
+def test_cabinet_branded_button_layout_uses_existing_callbacks():
     keyboard = cabinet_keyboard(news_url=None, support_url=None)
     assert all(getattr(button, "url", None) is None
                for row in keyboard.inline_keyboard for button in row)
-    keyboard = cabinet_keyboard(news_url="https://news.test", support_url="https://support.test")
-    assert len([b for row in keyboard.inline_keyboard for b in row
-                if getattr(b, "url", None)]) == 2
+    assert callbacks(keyboard) == [
+        "client_connect", "tariffs", "client_devices", "connect_help",
+        "client_invite", "client_support", "client_home",
+    ]
 
 
 def test_stale_binding_is_preserved_and_recoverable():
@@ -193,6 +207,19 @@ def test_pending_order_is_persistent_and_duplicate_safe(tmp_path, local_db):
     assert created is True and duplicate is False and first.id == second.id
     assert repo.get_order(first.id).status is OrderStatus.PENDING
     assert first.days == 180 and first.amount_rub == 899
+
+
+def test_pending_order_can_be_replaced_without_two_active_requests(tmp_path, local_db):
+    service, repo, _, _ = order_service(tmp_path, local_db)
+    service.billing.token_factory = iter(("FIRST", "SECOND")).__next__
+    first, _ = service.create_request(42, "m1")
+    replacement = service.replace_request(42, first.id, "m6")
+    assert repo.get_order(first.id).status is OrderStatus.CANCELLED
+    assert replacement.status is OrderStatus.PENDING
+    assert replacement.plan_id == "m6"
+    assert repo.get_pending_for_user(42).id == replacement.id
+    with pytest.raises(CustomerOrderError, match="недоступна"):
+        service.get_request(99, replacement.id)
 
 
 def test_new_user_approval_provisions_once_binds_and_is_idempotent(tmp_path, local_db):

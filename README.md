@@ -396,3 +396,53 @@ the mobile credential at 50 GiB with unlimited HWID (`limitHwid=0`). Each client
 is verified before its user is notified. Successful notifications receive a
 persistent migration event marker, so retries do not resend them; a failed send
 is not marked and remains retryable.
+
+### Telegram single-screen navigation and seasonal avatars
+
+Customer callbacks reuse one current bot UI message. Text screens are edited in
+place; transitions to QR/photo/video delete the previous bot UI message and send
+one replacement, whose message ID becomes current. Returning from media performs
+the inverse replacement. Telegram's `Message is not modified` response is treated
+as a successful no-op. Ordinary user messages are never deleted by this layer.
+
+The registered-user cabinet is one compound logical screen containing the first
+sticker resolved from `getStickerSet("KarinaVPN")` and one HTML menu message. Both
+message IDs are tracked and cleared together when leaving the cabinet. Returning
+recreates the pair; refresh edits only the menu and retains the sticker. The first
+resolved sticker file ID is cached for the bot process. Sticker lookup, send, and
+cleanup failures are isolated, so the cabinet text always remains available.
+
+The first unregistered `/start` displays a compact welcome screen. Pending manual
+payment requests show their tariff, amount, status and creation time, with actions
+to change the tariff or cancel after confirmation. Replacing a tariff cancels the
+old pending request before creating its replacement, so only one remains active.
+
+Avatar selection uses `Europe/Moscow`. Seasonal defaults are spring (March-May),
+summer (June-August), autumn (September-November), and winter
+(December-February). Holiday overrides are February 14 and 23, March 8, April 12,
+May 9, June 12, September 1, October 31, plus New Year from December 20 through
+January 8. `TG_day.png` is available but disabled because no project date is
+defined for it. Missing holiday images fall back to the season, then `main.png`.
+
+Configuration:
+
+```env
+AVATAR_CHAT_ID=<telegram-chat-id>
+AVATAR_DIR=/opt/karina-vpn/avatar
+AVATAR_STATE_FILE=/opt/karina-vpn/var/avatar-state.json
+CONNECT_VIDEO_PATH=/opt/karina-vpn/avatar/video_1.mp4
+```
+
+`AVATAR_CHAT_ID` is optional. The bot checks once at startup and then daily near
+00:05 Moscow time. Bot and chat outcomes are stored separately, preventing repeat
+uploads and allowing one failed target to retry without affecting polling. The
+current python-telegram-bot 20.8 package has no public `set_my_profile_photo`
+wrapper, so the scheduler uses its standard `_post` transport for the exact Bot
+API `setMyProfilePhoto` method. `set_chat_photo` remains the public PTB method.
+Both failures are logged and isolated.
+
+Inspect selection and persisted status without Telegram mutation:
+
+```bash
+karina-user avatar-status
+```

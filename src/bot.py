@@ -3,6 +3,7 @@ import logging
 import secrets
 import sqlite3
 import time
+from datetime import datetime
 from contextlib import closing
 from pathlib import Path
 
@@ -36,6 +37,8 @@ try:
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from .telegram_navigation import show_compound, show_photo, show_text, show_video
+    from .avatar_scheduler import TIMEZONE as MOSCOW_TIMEZONE, post_init as avatar_post_init
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
     from application import build_client_service
@@ -51,6 +54,8 @@ except ImportError:  # Direct execution from the src directory.
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from telegram_navigation import show_compound, show_photo, show_text, show_video
+    from avatar_scheduler import TIMEZONE as MOSCOW_TIMEZONE, post_init as avatar_post_init
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -599,7 +604,22 @@ def format_user_cabinet(bundle, mobile_traffic, traffic_unavailable=False, now_m
     return markdown_v2_escape("\n".join(lines))
 
 
-async def render_client_home(update, email):
+async def resolve_main_sticker(context):
+    cache = (context.application.bot_data if getattr(context, "application", None)
+             else getattr(context, "user_data", {}))
+    if cache.get("karina_main_sticker_file_id"):
+        return cache["karina_main_sticker_file_id"]
+    try:
+        sticker_set = await context.bot.get_sticker_set("KarinaVPN")
+        sticker = sticker_set.stickers[0]
+        cache["karina_main_sticker_file_id"] = sticker.file_id
+        return sticker.file_id
+    except Exception:
+        LOGGER.warning("Unable to resolve first sticker from KarinaVPN", exc_info=True)
+        return None
+
+
+async def render_client_home(update, email, context=None):
     try:
         service = build_client_service()
         bundle = service.get_client_bundle(email)
@@ -617,13 +637,22 @@ async def render_client_home(update, email):
             except EXPECTED_SERVICE_ERRORS:
                 LOGGER.warning("Mobile traffic unavailable for cabinet", exc_info=True)
                 mobile_traffic, unavailable = None, True
-            text = format_cabinet(bundle, mobile_traffic, traffic_unavailable=unavailable)
+            text = format_cabinet(
+                bundle, mobile_traffic, traffic_unavailable=unavailable,
+                telegram_id=getattr(getattr(update, "effective_user", None), "id", None),
+            )
             keyboard = cabinet_keyboard(
                 news_url=getattr(CUSTOMER_CONFIG, "news_channel_url", None),
                 support_url=SUPPORT_URL,
             )
 
-    if update.callback_query:
+    if context is not None:
+        sticker = await resolve_main_sticker(context)
+        await show_compound(
+            update, context, screen_key="main", sticker=sticker, text=text,
+            reply_markup=keyboard, parse_mode=ParseMode.HTML,
+        )
+    elif update.callback_query:
         await update.callback_query.edit_message_text(
             text, reply_markup=keyboard,
         )
@@ -633,7 +662,7 @@ async def render_client_home(update, email):
         )
 
 
-async def client_devices(update, email):
+async def client_devices(update, email, context=None):
     try:
         service = build_client_service()
         bundle = service.get_client_bundle(email)
@@ -665,11 +694,13 @@ async def client_devices(update, email):
         ]
     )
 
-    await update.callback_query.edit_message_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
+    if context is not None:
+        await show_text(update, context, text, reply_markup=keyboard,
+                        parse_mode=ParseMode.MARKDOWN_V2)
+    else:
+        await update.callback_query.edit_message_text(
+            text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN_V2,
+        )
 
 
 async def client_traffic(update, email):
@@ -1373,6 +1404,8 @@ async def admin_bundle_action_callback(update, context, data):
 
 async def telegram_error_handler(update, context):
     error = context.error
+    if error and "message is not modified" in str(error).lower():
+        return
     LOGGER.error(
         "Unhandled Telegram update exception",
         exc_info=(type(error), error, error.__traceback__) if error else None,
@@ -1436,12 +1469,36 @@ async def render_membership_error(update):
         await update.message.reply_text(text)
 
 
-async def render_tariffs(update, back_callback=None):
+async def render_tariffs(update, back_callback=None, context=None):
     text, keyboard = tariff_list_view(support_url=SUPPORT_URL, back_callback=back_callback)
-    if update.callback_query:
+    if context is not None:
+        await show_text(update, context, text, reply_markup=keyboard)
+    elif update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
         await update.message.reply_text(text, reply_markup=keyboard)
+
+
+def welcome_view():
+    return (
+        "💗 Карина VPN\n\nБыстрый и простой VPN для ваших устройств.\n\n"
+        "Одна подписка включает обычные серверы и отдельные подключения для "
+        "работы при мобильных ограничениях. Управление — прямо в этом боте.",
+        InlineKeyboardMarkup([[
+            InlineKeyboardButton("🚀 Начать", callback_data="welcome_start")
+        ]]),
+    )
+
+
+def pending_request_view(order, plan, *, back_callback):
+    created = datetime.fromtimestamp(order.created_at, MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M")
+    text = (f"🧾 Заявка на оплату\n\nТариф: {plan.title}\n"
+            f"Сумма: {plan.price_rub} ₽\nСтатус: ожидает оплаты\nСоздана: {created}")
+    return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("Изменить тариф", callback_data=f"order_change:{order.id}")],
+        [InlineKeyboardButton("Отменить заявку", callback_data=f"order_cancel:{order.id}")],
+        [InlineKeyboardButton("← Назад", callback_data=back_callback)],
+    ])
 
 
 async def send_menu_animation(update, context):
@@ -1504,29 +1561,20 @@ async def start(
             )
             return
 
-        await update.message.reply_text(
-            "✅ Telegram успешно привязан к Карина VPN."
-        )
+        await show_text(update, context, "✅ Telegram успешно привязан к Карина VPN.")
 
-        await render_client_home(
-            update,
-            email,
-        )
+        await render_client_home(update, email, context)
 
         return
 
     # Client.
     if link:
-        await send_menu_animation(update, context)
-        await render_client_home(
-            update,
-            link["email"],
-        )
+        await render_client_home(update, link["email"], context)
 
         return
 
-    text, keyboard = tariff_list_view(support_url=SUPPORT_URL)
-    await update.message.reply_text(text, reply_markup=keyboard)
+    text, keyboard = welcome_view()
+    await show_text(update, context, text, reply_markup=keyboard)
 
 
 # ============================================================
@@ -1548,6 +1596,41 @@ async def callbacks(
     data = query.data
     if not isinstance(data, str):
         return
+    if data == "welcome_start":
+        await render_tariffs(update, context=context)
+        return
+    if re.fullmatch(r"order_change:[A-Za-z0-9_-]+", data):
+        context.user_data["replace_order_id"] = data.split(":", 1)[1]
+        await render_tariffs(update, back_callback="client_home" if get_link_by_tg(update.effective_user.id) else None, context=context)
+        return
+    if re.fullmatch(r"order_cancel:[A-Za-z0-9_-]+", data):
+        order_id = data.split(":", 1)[1]
+        await show_text(update, context, "Отменить заявку на оплату?", reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("Да, отменить", callback_data=f"order_cancel_yes:{order_id}"),
+            InlineKeyboardButton("Нет", callback_data=f"order_cancel_no:{order_id}"),
+        ]]))
+        return
+    if re.fullmatch(r"order_cancel_(?:yes|no):[A-Za-z0-9_-]+", data):
+        answer, order_id = data.split(":", 1)
+        try:
+            orders = build_customer_order_service()
+            order = orders.get_request(update.effective_user.id, order_id)
+        except (CustomerOrderError, BillingError, sqlite3.Error):
+            await query.answer("Заявка недоступна", show_alert=True)
+            return
+        if answer.endswith("no"):
+            plan = get_tariff(order.plan_id)
+            text, keyboard = pending_request_view(order, plan, back_callback="client_home" if get_link_by_tg(order.tg_id) else "tariffs")
+            await show_text(update, context, text, reply_markup=keyboard)
+            return
+        try:
+            orders.reject(order_id)
+        except (CustomerOrderError, BillingError, sqlite3.Error):
+            await query.answer("Заявка уже закрыта", show_alert=True)
+            return
+        context.user_data.pop("replace_order_id", None)
+        await render_tariffs(update, back_callback="client_home" if get_link_by_tg(order.tg_id) else None, context=context)
+        return
     if data == "membership_check":
         try:
             member = await check_required_membership(context.bot, update.effective_user.id)
@@ -1559,9 +1642,9 @@ async def callbacks(
             return
         link = get_link_by_tg(update.effective_user.id)
         if link:
-            await render_client_home(update, link["email"])
+            await render_client_home(update, link["email"], context)
         else:
-            await render_tariffs(update)
+            await render_tariffs(update, context=context)
         return
 
     if data.startswith(("oa:", "or:")):
@@ -1705,7 +1788,7 @@ async def callbacks(
                 await render_membership_gate(update, still_missing=True)
                 return
         if data == "tariffs":
-            await render_tariffs(update, back_callback="client_home" if link else None)
+            await render_tariffs(update, back_callback="client_home" if link else None, context=context)
         else:
             code = data.split(":", 1)[1]
             try:
@@ -1743,7 +1826,11 @@ async def callbacks(
                     )
                     return
             orders = build_customer_order_service()
-            order, created = orders.create_request(user.id, code)
+            replacing = context.user_data.pop("replace_order_id", None)
+            if replacing:
+                order, created = orders.replace_request(user.id, replacing, code), True
+            else:
+                order, created = orders.create_request(user.id, code)
             plan = get_tariff(order.plan_id)
             if plan is None:
                 raise CustomerOrderError("Тариф недоступен")
@@ -1751,14 +1838,10 @@ async def callbacks(
             LOGGER.warning("Order creation failed", exc_info=True)
             await query.answer("Не удалось создать заявку", show_alert=True)
             return
-        text = ("✅ Заявка создана" if created else "🧾 У вас уже есть заявка")
-        text += (f"\n\nТариф: {plan.title}\nСтоимость: {plan.price_rub} ₽\n\n"
-                 "После подтверждения оплаты подписка будет активирована автоматически.")
-        rows = []
-        if SUPPORT_URL:
-            rows.append([InlineKeyboardButton("💬 Поддержка", url=SUPPORT_URL)])
-        rows.append([InlineKeyboardButton("← В меню", callback_data="client_home" if link else "tariffs")])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
+        text, keyboard = pending_request_view(
+            order, plan, back_callback="client_home" if link else "tariffs",
+        )
+        await show_text(update, context, text, reply_markup=keyboard)
         if created:
             display = user.full_name or user.username or "Пользователь Telegram"
             await context.bot.send_message(
@@ -1799,17 +1882,11 @@ async def callbacks(
             return
 
     if data == "client_home":
-        await render_client_home(
-            update,
-            email,
-        )
+        await render_client_home(update, email, context)
         return
 
     if data == "client_devices":
-        await client_devices(
-            update,
-            email,
-        )
+        await client_devices(update, email, context)
         return
 
     if data == "client_connect":
@@ -1818,9 +1895,9 @@ async def callbacks(
             page = service.reissue_bundle_connection(email)
             mobile_url = service.get_mobile_subscription_url(email)
             text, keyboard = connection_view(page, mobile_url)
-            await query.edit_message_text(text, reply_markup=keyboard)
+            await show_text(update, context, text, reply_markup=keyboard)
         except EXPECTED_SERVICE_ERRORS as exc:
-            await query.edit_message_text(safe_user_error(exc))
+            await show_text(update, context, safe_user_error(exc))
         return
 
     if data == "client_qr":
@@ -1829,34 +1906,36 @@ async def callbacks(
             qr = page[:-5] + ".png" if page.endswith(".html") else None
             if not qr:
                 raise ClientServiceError("QR-код временно недоступен")
-            await query.edit_message_text(
-                "📷 QR-код подключения\n\nОткрой Happ → добавление подписки → сканирование QR.",
+            await show_photo(
+                update, context, qr,
+                caption="📷 QR-код подключения\n\nОткрой Happ → добавление подписки → сканирование QR.",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🎬 Как это сделать", callback_data="connect_video")],
                     [InlineKeyboardButton("← Назад", callback_data="client_connect")],
                 ]),
             )
-            await query.message.reply_photo(photo=qr)
         except EXPECTED_SERVICE_ERRORS as exc:
             await query.edit_message_text(safe_user_error(exc))
         return
 
     if data in {"client_help", "connect_help"}:
         text, keyboard = platform_choice_view()
-        await query.edit_message_text(text, reply_markup=keyboard)
+        await show_text(update, context, text, reply_markup=keyboard)
         return
 
     if re.fullmatch(r"platform:(android|ios|windows|macos)", data):
         text, keyboard = platform_view(data.split(":", 1)[1], CUSTOMER_CONFIG)
-        await query.edit_message_text(text, reply_markup=keyboard)
+        await show_text(update, context, text, reply_markup=keyboard)
         return
 
     if data == "connect_video":
         file_id = getattr(CUSTOMER_CONFIG, "connect_video_file_id", None)
-        if file_id:
+        local_video = getattr(CUSTOMER_CONFIG, "connect_video_path", None)
+        video = local_video if local_video and Path(local_video).is_file() else file_id
+        if video:
             try:
-                await context.bot.send_video(
-                    chat_id=user.id, video=file_id,
+                await show_video(
+                    update, context, video,
                     caption="🎬 Как подключить Карина VPN\n\nВесь процесс занимает меньше минуты.",
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("🔑 Получить подключение", callback_data="client_connect")
@@ -1874,7 +1953,7 @@ async def callbacks(
 
     if data == "client_support":
         text, keyboard = support_view(SUPPORT_URL)
-        await query.edit_message_text(text, reply_markup=keyboard)
+        await show_text(update, context, text, reply_markup=keyboard)
         return
 
     if data == "client_invite":
@@ -2028,8 +2107,10 @@ def main():
         Application
         .builder()
         .token(BOT_TOKEN)
+        .post_init(avatar_post_init)
         .build()
     )
+    app.bot_data["config"] = config
 
     app.add_handler(
         CommandHandler(

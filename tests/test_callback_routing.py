@@ -31,6 +31,26 @@ def client(email="demo_target", warning=None):
     )
 
 
+async def _show_text(update, context, text, **kwargs):
+    target = update.callback_query.edit_message_text if update.callback_query else update.message.reply_text
+    return await target(text, **kwargs)
+
+
+async def _show_photo(update, context, photo, **kwargs):
+    return await context.bot.send_photo(photo=photo, **kwargs)
+
+
+async def _show_video(update, context, video, **kwargs):
+    return await context.bot.send_video(video=video, **kwargs)
+
+
+async def _show_compound(update, context, **kwargs):
+    context.user_data["compound_screen"] = kwargs
+    return await update.callback_query.edit_message_text(
+        kwargs["text"], reply_markup=kwargs.get("reply_markup"),
+    )
+
+
 @pytest.fixture
 def bot(source_functions, local_db):
     names = {
@@ -42,7 +62,9 @@ def bot(source_functions, local_db):
         "admin_bundle_user", "format_bundle_profile", "bytes_to_human",
         "membership_required", "check_required_membership", "membership_keyboard",
         "render_membership_gate", "render_membership_error", "format_user_cabinet",
-        "render_tariffs", "send_menu_animation",
+        "render_tariffs", "send_menu_animation", "welcome_view",
+        "pending_request_view",
+        "resolve_main_sticker",
     }
 
     def connect():
@@ -72,7 +94,7 @@ def bot(source_functions, local_db):
         ACTION_TIMEOUT_SECONDS=600, ADMIN_USERS_PAGE_SIZE=20,
         is_mobile_email=lambda email: email.endswith("__mobile"),
         InlineKeyboardButton=button, InlineKeyboardMarkup=lambda rows: rows,
-        ParseMode=NS(MARKDOWN_V2="MarkdownV2"), SUPPORT_URL="https://example.test/support",
+        ParseMode=NS(MARKDOWN_V2="MarkdownV2", HTML="HTML"), SUPPORT_URL="https://example.test/support",
         build_client_service=lambda: service, EXPECTED_SERVICE_ERRORS=(RuntimeError,),
         LOGGER=NS(warning=Mock()),
         _markdown_v2_escape=markdown_v2_escape,
@@ -82,6 +104,12 @@ def bot(source_functions, local_db):
         CUSTOMER_CONFIG=NS(menu_animation_file_id=None),
         tariff_list_view=lambda **kwargs: ("tariffs", []),
         connection_view=lambda page, mobile=None: ("connection", []),
+        format_cabinet=lambda bundle, traffic, **kwargs: "Личный кабинет",
+        cabinet_keyboard=lambda **kwargs: [],
+        show_text=_show_text,
+        show_photo=_show_photo,
+        show_video=_show_video,
+        show_compound=_show_compound,
     )
     functions["_service"] = service
     return functions
@@ -291,7 +319,9 @@ def test_unbound_member_continues_existing_onboarding(bot):
     api = NS(get_chat_member=AsyncMock(return_value=NS(status="member")))
     upd = update("unused", user=44)
     run(bot["start"](upd, NS(args=[], bot=api)))
-    assert upd.message.reply_text.call_args.args[0] == "tariffs"
+    call = upd.callback_query.edit_message_text.call_args
+    assert "Карина VPN" in call.args[0]
+    assert call.kwargs["reply_markup"][0][0].callback_data == "welcome_start"
 
 
 def test_all_users_mode_rechecks_linked_user(bot):
@@ -336,3 +366,33 @@ def test_client_connect_and_reset_are_bound_to_own_email(bot):
     bot["_service"].reset_bundle_devices.assert_not_called()
     invoke(bot, "client_reset_confirm", context=context, user=2)
     bot["_service"].reset_bundle_devices.assert_called_once_with("demo_other")
+
+
+def test_pending_request_change_returns_to_tariffs_without_creating_order(bot):
+    context = NS(user_data={})
+    upd = invoke(bot, "order_change:KV-SYNTHETIC", context=context, user=44)
+    assert context.user_data["replace_order_id"] == "KV-SYNTHETIC"
+    assert upd.callback_query.edit_message_text.call_args.args[0] == "tariffs"
+
+
+def test_pending_request_cancel_requires_confirmation(bot):
+    upd = invoke(bot, "order_cancel:KV-SYNTHETIC", context=NS(user_data={}), user=44)
+    call = upd.callback_query.edit_message_text.call_args
+    assert call.args[0] == "Отменить заявку на оплату?"
+    callbacks = [button.callback_data for button in call.kwargs["reply_markup"][0]]
+    assert callbacks == ["order_cancel_yes:KV-SYNTHETIC", "order_cancel_no:KV-SYNTHETIC"]
+
+
+def test_main_sticker_resolves_first_item_and_caches_file_id(bot):
+    api = NS(get_sticker_set=AsyncMock(return_value=NS(stickers=[
+        NS(file_id="first"), NS(file_id="second"),
+    ])))
+    context = NS(bot=api, user_data={})
+    assert run(bot["resolve_main_sticker"](context)) == "first"
+    assert run(bot["resolve_main_sticker"](context)) == "first"
+    api.get_sticker_set.assert_awaited_once_with("KarinaVPN")
+
+
+def test_main_sticker_failure_returns_none_without_breaking_cabinet(bot):
+    api = NS(get_sticker_set=AsyncMock(side_effect=RuntimeError("telegram")))
+    assert run(bot["resolve_main_sticker"](NS(bot=api, user_data={}))) is None

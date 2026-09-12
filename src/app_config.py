@@ -27,6 +27,7 @@ class KarinaConfig:
     required_membership_mode: str = "new_users"
     menu_animation_file_id: str | None = None
     connect_video_file_id: str | None = None
+    connect_video_path: Path = Path("/opt/karina-vpn/avatar/video_1.mp4")
     news_channel_url: str | None = None
     support_url: str | None = None
     telegraph_android_url: str | None = None
@@ -37,6 +38,9 @@ class KarinaConfig:
     happ_ios_url: str | None = None
     happ_windows_url: str | None = None
     happ_macos_url: str | None = None
+    avatar_chat_id: int | None = None
+    avatar_dir: Path = Path("/opt/karina-vpn/avatar")
+    avatar_state_file: Path = Path("/opt/karina-vpn/var/avatar-state.json")
 
 
 def _optional_https_url(values, key):
@@ -120,6 +124,11 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         required_tg_chat_id = int(chat_id_text) if chat_id_text else None
     except ValueError as exc:
         raise ConfigError("invalid REQUIRED_TG_CHAT_ID") from exc
+    avatar_chat_text = values.get("AVATAR_CHAT_ID", "").strip()
+    try:
+        avatar_chat_id = int(avatar_chat_text) if avatar_chat_text else None
+    except ValueError as exc:
+        raise ConfigError("invalid AVATAR_CHAT_ID") from exc
     required_tg_chat_url = values.get("REQUIRED_TG_CHAT_URL", "").strip() or None
     if membership_mode != "disabled" and (
             required_tg_chat_id is None or not required_tg_chat_url
@@ -145,6 +154,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         required_membership_mode=membership_mode,
         menu_animation_file_id=values.get("MENU_ANIMATION_FILE_ID", "").strip() or None,
         connect_video_file_id=values.get("CONNECT_VIDEO_FILE_ID", "").strip() or None,
+        connect_video_path=Path(values.get("CONNECT_VIDEO_PATH", "/opt/karina-vpn/avatar/video_1.mp4")),
         news_channel_url=_optional_https_url(values, "NEWS_CHANNEL_URL"),
         support_url=_optional_https_url(values, "SUPPORT_URL"),
         telegraph_android_url=_optional_https_url(values, "TELEGRAPH_ANDROID_URL"),
@@ -155,4 +165,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         happ_ios_url=_optional_https_url(values, "HAPP_IOS_URL"),
         happ_windows_url=_optional_https_url(values, "HAPP_WINDOWS_URL"),
         happ_macos_url=_optional_https_url(values, "HAPP_MACOS_URL"),
+        avatar_chat_id=avatar_chat_id,
+        avatar_dir=Path(values.get("AVATAR_DIR", "/opt/karina-vpn/avatar")),
+        avatar_state_file=Path(values.get("AVATAR_STATE_FILE", "/opt/karina-vpn/var/avatar-state.json")),
     )

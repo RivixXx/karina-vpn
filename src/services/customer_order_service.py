@@ -42,6 +42,27 @@ class CustomerOrderService:
         kind = "renewal" if link else "new"
         return self.billing.create_order(tg_id, email, plan_id, kind=kind), True
 
+    def replace_request(self, tg_id, order_id, plan_id):
+        current = self.get_request(tg_id, order_id)
+        if current.status is not OrderStatus.PENDING:
+            raise CustomerOrderError("Заявка недоступна")
+        plan = self.billing.plans.get(plan_id)
+        if plan is None or not plan.enabled:
+            raise UnknownPlanError("Неизвестный тариф")
+        cancelled = self.billing.repository.cancel_order(order_id)
+        if cancelled is None:
+            raise CustomerOrderError("Статус заявки изменился")
+        link = self.get_binding(tg_id)
+        email = link["email"] if link else self.generated_email(tg_id)
+        kind = "renewal" if link else "new"
+        return self.billing.create_order(tg_id, email, plan_id, kind=kind)
+
+    def get_request(self, tg_id, order_id):
+        order = self.billing.get_order(order_id)
+        if order is None or order.tg_id != tg_id:
+            raise CustomerOrderError("Заявка недоступна")
+        return order
+
     def approve(self, order_id):
         order = self.billing.get_order(order_id)
         if order is None:
