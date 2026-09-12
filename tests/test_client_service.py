@@ -733,6 +733,21 @@ def test_unlimited_bundle_extension_uses_now_as_base(config, tmp_path):
     assert xui.clients["demo__mobile"]["client"]["expiryTime"] == NOW + 30 * DAY
 
 
+def test_absolute_bundle_expiry_reconciles_both_without_mutating_credentials(config, tmp_path):
+    clients = bundle_clients()
+    before = deepcopy(clients)
+    service, xui = make_service(config, tmp_path, clients)
+    target = NOW + 45 * DAY
+    service.set_bundle_expiry("demo", target)
+    assert xui.clients["demo"]["client"]["expiryTime"] == target
+    assert xui.clients["demo__mobile"]["client"]["expiryTime"] == target
+    assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
+    for email in ("demo", "demo__mobile"):
+        assert xui.clients[email]["client"]["subId"] == before[email]["client"]["subId"]
+        assert xui.clients[email]["client"]["totalGB"] == before[email]["client"]["totalGB"]
+        assert xui.clients[email]["inboundIds"] == before[email]["inboundIds"]
+
+
 def test_primary_only_extension_keeps_legacy_behavior(config, tmp_path):
     service, xui = make_service(
         config, tmp_path, {"demo": raw_client("demo", expiry=NOW + DAY)},

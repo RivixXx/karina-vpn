@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlencode
 
 from telegram import (
     InlineKeyboardButton,
@@ -27,11 +28,12 @@ try:
     from .application import build_client_service
     from .integrations.xui import XUIError
     from .models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
-    from .repositories import BillingRepository
+    from .repositories import BillingRepository, ReferralRepository
     from .telegram_format import markdown_v2_escape as _markdown_v2_escape
     from .services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
-        CustomerOrderError, CustomerOrderService, ReconciliationRequiredError, ValidationError,
+        CustomerOrderError, CustomerOrderService, ReferralService,
+        ReconciliationRequiredError, ValidationError,
     )
     from .ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from .ui.connection import connection_view
@@ -44,11 +46,12 @@ except ImportError:  # Direct execution from the src directory.
     from application import build_client_service
     from integrations.xui import XUIError
     from models import ClientInfo, DeviceInfo, OrderStatus, TrafficInfo, is_mobile_email
-    from repositories import BillingRepository
+    from repositories import BillingRepository, ReferralRepository
     from telegram_format import markdown_v2_escape as _markdown_v2_escape
     from services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
-        CustomerOrderError, CustomerOrderService, ReconciliationRequiredError, ValidationError,
+        CustomerOrderError, CustomerOrderService, ReferralService,
+        ReconciliationRequiredError, ValidationError,
     )
     from ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from ui.connection import connection_view
@@ -773,6 +776,99 @@ async def client_devices(update, email, context=None):
         await update.callback_query.edit_message_text(
             text, reply_markup=keyboard,
         )
+
+
+def format_referral_home(stats, referral_url):
+    return (
+        "👥 ПРИГЛАСИ ДРУГА • Карина VPN\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Получайте бонусы за друзей, которые начнут пользоваться Карина VPN 💗\n\n"
+        "⚙️ Как это работает?\n\n"
+        "1️⃣ Отправьте другу свою персональную ссылку.\n"
+        "2️⃣ Друг запускает Карина VPN и оформляет подписку.\n"
+        "3️⃣ После его первой подтверждённой оплаты вы автоматически получаете бонус.\n\n"
+        "🎁 Ваш бонус:\n+3 дня подписки за каждого оплатившего друга.\n\n"
+        "📊 Ваша статистика:\n\n"
+        f"👥 Приглашено: {stats['invited']}\n"
+        f"✅ Оплатили: {stats['qualified']}\n"
+        f"🎁 Заработано: {stats['earned_days']} дней\n\n"
+        f"🔗 Ваша реферальная ссылка:\n{referral_url}\n\n"
+        "💡 Чем больше друзей подключается, тем дольше вы пользуетесь Карина VPN."
+    )
+
+
+def format_referral_list(rows):
+    lines = ["👥 МОИ РЕФЕРАЛЫ", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    if not rows:
+        return "\n".join(lines + ["Вы пока никого не пригласили."])
+    for position, row in enumerate(rows, 1):
+        identity = row["referred_first_name"] or (
+            f"@{row['referred_username']}" if row["referred_username"] else f"Пользователь {position}"
+        )
+        status = {"attributed": "🕓 Ожидает оплаты", "qualified": "✅ Оплатил",
+                  "rewarded": "🎁 Бонус начислен", "rejected": "Отклонён"}[row["status"]]
+        date = datetime.fromtimestamp(row["attributed_at"], MOSCOW_TIMEZONE).strftime("%d.%m.%Y")
+        lines.extend([f"{position}. {identity}", f"   {date} · {status}", ""])
+    return "\n".join(lines).rstrip()
+
+
+def format_referral_rewards(rows):
+    lines = ["🎁 МОИ БОНУСЫ", "━━━━━━━━━━━━━━━━━━━━━━", ""]
+    if not rows:
+        return "\n".join(lines + ["Начисленных бонусов пока нет."])
+    total = 0
+    for row in rows:
+        total += row["amount"]
+        date = datetime.fromtimestamp(row["applied_at"], MOSCOW_TIMEZONE).strftime("%d.%m.%Y")
+        lines.extend([f"+{row['amount']} дня", "За приглашённого пользователя", date, ""])
+    lines.append(f"Итого: +{total} дней подписки")
+    return "\n".join(lines)
+
+
+async def render_referral_home(update, context, tg_id):
+    service = build_referral_service()
+    profile = service.profile(tg_id)
+    stats = service.repository.stats(tg_id)
+    bot_user = await context.bot.get_me()
+    referral_url = f"https://t.me/{bot_user.username}?start=ref_{profile['referral_code']}"
+    share_url = "https://t.me/share/url?" + urlencode({
+        "url": referral_url,
+        "text": "Я пользуюсь Карина VPN 💗\nПопробуй тоже — вот моя ссылка:",
+    })
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📤 Поделиться с друзьями", url=share_url)],
+        [InlineKeyboardButton("👥 Мои рефералы", callback_data="client_referrals"),
+         InlineKeyboardButton("🎁 Мои бонусы", callback_data="client_bonus")],
+        [InlineKeyboardButton("← Назад", callback_data="client_home")],
+    ])
+    sticker = await resolve_sticker(context, 14)
+    await show_compound(
+        update, context, screen_key="referral", sticker=sticker,
+        text=format_referral_home(stats, referral_url), reply_markup=keyboard,
+    )
+
+
+async def apply_referral_reward(order, context):
+    referrals = build_referral_service()
+    reward = referrals.qualify_after_first_successful_payment(order)
+    if reward is None or reward["applied_at"] is None or reward["notified_at"] is not None:
+        return reward
+    expiry = datetime.fromtimestamp(
+        reward["target_expiry_ms"] / 1000, MOSCOW_TIMEZONE,
+    ).strftime("%d.%m.%Y")
+    try:
+        await context.bot.send_message(
+            chat_id=reward["recipient_tg_id"],
+            text=("🎁 Вам начислен бонус!\n\n"
+                  "Ваш друг оформил Карина VPN 💗\n"
+                  "Мы добавили к вашей подписке +3 дня.\n\n"
+                  f"Новая дата окончания: {expiry}\n\n"
+                  "Спасибо, что рекомендуете Карина VPN 🫶"),
+        )
+        referrals.repository.mark_notified(reward["id"])
+    except Exception:
+        LOGGER.warning("Referral reward notification failed", exc_info=True)
+    return reward
 
 
 async def client_traffic(update, email):
@@ -1562,6 +1658,12 @@ def welcome_view():
     )
 
 
+def build_referral_service():
+    repository = ReferralRepository(DB_FILE)
+    repository.init_schema()
+    return ReferralService(repository, build_client_service, get_link_by_tg)
+
+
 def pending_request_view(order, plan, *, back_callback):
     created = datetime.fromtimestamp(order.created_at, MOSCOW_TIMEZONE).strftime("%d.%m.%Y %H:%M")
     text = (f"🧾 Заявка на оплату\n\nТариф: {plan.title}\n"
@@ -1607,6 +1709,13 @@ async def start(
         return
 
     link = get_link_by_tg(user.id)
+
+    if (not link and args and len(args) == 1
+            and re.fullmatch(r"ref_[A-Za-z0-9_-]{6,32}", args[0])):
+        try:
+            build_referral_service().attribute(args[0][4:], user)
+        except sqlite3.Error:
+            LOGGER.warning("Referral attribution could not be stored", exc_info=True)
 
     if not is_admin(update) and membership_required(bool(link)):
         try:
@@ -1728,6 +1837,7 @@ async def callbacks(
             orders = build_customer_order_service()
             if action == "oa":
                 order, changed = orders.approve(order_id)
+                await apply_referral_reward(order, context)
                 await query.edit_message_text("✅ Заявка подтверждена." if changed else "✅ Заявка уже подтверждена.")
                 if changed:
                     bundle = build_client_service().get_client_bundle(order.email)
@@ -2038,14 +2148,20 @@ async def callbacks(
         return
 
     if data == "client_invite":
-        bot_user = await context.bot.get_me()
-        share_url = f"https://t.me/share/url?url=https%3A%2F%2Ft.me%2F{bot_user.username}&text=%D0%9A%D0%B0%D1%80%D0%B8%D0%BD%D0%B0%20VPN"
-        await query.edit_message_text(
-            "👥 Пригласи друга\n\nПоделись ссылкой на Карина VPN.",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("👥 Поделиться", url=share_url)],
-                [InlineKeyboardButton("← Назад", callback_data="client_home")],
-            ]),
+        await render_referral_home(update, context, user.id)
+        return
+
+    if data == "client_referral":
+        await render_referral_home(update, context, user.id)
+        return
+
+    if data == "client_referrals":
+        rows = build_referral_service().repository.list_referrals(user.id)
+        await show_text(
+            update, context, format_referral_list(rows),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад", callback_data="client_referral"),
+            ]]),
         )
         return
 
@@ -2187,21 +2303,12 @@ async def callbacks(
         return
 
     if data == "client_bonus":
-        await query.edit_message_text(
-            "🎁 *Бонусы Карина VPN*\n\n"
-            "Система бонусов и приглашений появится совсем скоро\\.\n\n"
-            "Мы уже готовим её к запуску 💗",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "🏠 Мой профиль",
-                            callback_data="client_home",
-                        )
-                    ]
-                ]
-            ),
-            parse_mode=ParseMode.MARKDOWN_V2,
+        rows = build_referral_service().repository.list_rewards(user.id)
+        await show_text(
+            update, context, format_referral_rewards(rows),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("← Назад", callback_data="client_referral"),
+            ]]),
         )
 
 

@@ -358,6 +358,24 @@ deploy script. It never restores or modifies SQLite data.
 **Code rollback is not data rollback.** Restore data only through a separate,
 explicitly reviewed recovery procedure using a verified backup.
 
+## Referrals
+
+Registered customers receive a stable, random URL-safe referral code lazily when
+they open the referral screen. A referral attribution is stored once for a new
+Telegram user and cannot be replaced or self-attributed. Following a link or
+creating a pending order does not earn a reward.
+
+The referrer receives three subscription days only after the referred user's
+first payment is confirmed and subscription provisioning completes. Qualification,
+the qualifying order, the absolute target expiry, and reward application are
+persisted in SQLite so approval retries and process restarts cannot apply the
+reward twice. The normal bundle reconciliation updates primary and mobile expiry.
+Existing customers receive a code on demand; no bulk migration is required.
+
+Traffic rewards are represented by the reward ledger design but are not issued:
+the current mobile quota is a fixed plan limit, rather than an additive traffic
+balance that can safely carry bonus entitlements.
+
 ## Mobile migration
 
 Migration is always manual and processes one email. A dry-run may read XUI but

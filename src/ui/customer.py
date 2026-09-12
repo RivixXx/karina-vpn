@@ -52,7 +52,7 @@ def cabinet_keyboard(*, news_url=None, support_url=None):
         [InlineKeyboardButton("💳 Купить / Продлить", callback_data="tariffs"),
          InlineKeyboardButton("📱 Мои устройства", callback_data="client_devices")],
         [InlineKeyboardButton("📖 Как подключить", callback_data="connect_help"),
-         InlineKeyboardButton("👥 Пригласить друга", callback_data="client_invite")],
+         InlineKeyboardButton("👥 Пригласить друга", callback_data="client_referral")],
         [InlineKeyboardButton("💬 Поддержка", callback_data="client_support"),
          InlineKeyboardButton("🔄 Обновить", callback_data="client_home")],
     ]

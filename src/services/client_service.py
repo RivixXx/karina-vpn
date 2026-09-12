@@ -626,6 +626,33 @@ class ClientService:
                 ) from exc
             raise
 
+    def set_bundle_expiry(self, email, target_expiry_ms) -> ClientInfo:
+        if type(target_expiry_ms) is not int or target_expiry_ms <= 0:
+            raise ValidationError("expiry must be a positive timestamp")
+        mobile_email = mobile_email_for(email)
+        self._require_raw(email)
+        mobile_exists = self.get_client(mobile_email) is not None
+        if mobile_exists:
+            def synchronize_mobile(client):
+                client["expiryTime"] = target_expiry_ms
+                client["limitHwid"] = 0
+            try:
+                self._update(mobile_email, synchronize_mobile)
+            except ClientServiceError as exc:
+                raise ReconciliationRequiredError(
+                    "mobile expiry reconciliation failed; primary was not changed"
+                ) from exc
+        try:
+            return self._update(
+                email, lambda client: client.__setitem__("expiryTime", target_expiry_ms),
+            )
+        except ClientServiceError as exc:
+            if mobile_exists:
+                raise ReconciliationRequiredError(
+                    "mobile expiry reconciled but primary update failed"
+                ) from exc
+            raise
+
     def enable_client(self, email) -> ClientInfo:
         return self._set_bundle_enabled(email, True)
 
