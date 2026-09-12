@@ -39,6 +39,7 @@ try:
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from .ui.support import FAQS, faq_view, support_home_view
     from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 except ImportError:  # Direct execution from the src directory.
@@ -57,6 +58,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from ui.support import FAQS, faq_view, support_home_view
     from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
 
@@ -869,6 +871,41 @@ async def apply_referral_reward(order, context):
     except Exception:
         LOGGER.warning("Referral reward notification failed", exc_info=True)
     return reward
+
+
+async def render_support_home(update, context):
+    knowledge_base_url = getattr(CUSTOMER_CONFIG, "knowledge_base_url", None)
+    text, keyboard = support_home_view(SUPPORT_URL, knowledge_base_url)
+    sticker = await resolve_sticker(context, 6)
+    await show_compound(
+        update, context, screen_key="support", sticker=sticker,
+        text=text, reply_markup=keyboard,
+    )
+
+
+async def render_support_faq(update, context, email, tg_id, slug):
+    mobile_url = None
+    device_slots = None
+    pending_order = None
+    try:
+        if slug in {"network", "antiblock", "speed"}:
+            mobile_url = build_client_service().get_mobile_subscription_url(email)
+        elif slug == "devices":
+            service = build_client_service()
+            bundle = service.get_client_bundle(email)
+            if bundle is not None:
+                device_slots = (len(service.get_bundle_devices(email)), bundle.primary.device_limit)
+        elif slug == "payment":
+            repository = BillingRepository(DB_FILE)
+            repository.init_schema()
+            pending_order = repository.get_pending_for_user(tg_id)
+    except EXPECTED_SERVICE_ERRORS + EXPECTED_BILLING_ERRORS:
+        LOGGER.warning("Optional FAQ context is unavailable", exc_info=True)
+    text, keyboard = faq_view(
+        slug, support_url=SUPPORT_URL, mobile_url=mobile_url,
+        device_slots=device_slots, pending_order=pending_order,
+    )
+    await show_text(update, context, text, reply_markup=keyboard)
 
 
 async def client_traffic(update, email):
@@ -2143,8 +2180,12 @@ async def callbacks(
         return
 
     if data == "client_support":
-        text, keyboard = support_view(SUPPORT_URL)
-        await show_text(update, context, text, reply_markup=keyboard)
+        await render_support_home(update, context)
+        return
+
+    faq_match = re.fullmatch(r"support_faq:(network|antiblock|devices|payment|speed|quicklaunch|transfer)", data)
+    if faq_match:
+        await render_support_faq(update, context, email, user.id, faq_match[1])
         return
 
     if data == "client_invite":
