@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import json
+import asyncio
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -326,6 +328,44 @@ def cmd_migrate_mobile(args):
     print("\nMigration applied. Run dry-run again to verify ALREADY MIGRATED.")
 
 
+def cmd_migrate_bundle_cohort(args):
+    if args not in ([], ["--dry-run"], ["--apply", "--confirm", "APPLY-PRIMARY-MOBILE"]):
+        die("usage: karina-user migrate-bundle-cohort [--dry-run|--apply --confirm APPLY-PRIMARY-MOBILE]")
+    try:
+        from .cohort_migration import apply_cohort, build_dry_run, format_dry_run
+        from .bot import get_link_by_email
+        from .notifier import event_sent, mark_event_sent
+    except ImportError:
+        from cohort_migration import apply_cohort, build_dry_run, format_dry_run
+        from bot import get_link_by_email
+        from notifier import event_sent, mark_event_sent
+    service = build_service()
+    reports = build_dry_run(service, get_link_by_email, event_sent)
+    print(format_dry_run(reports))
+    if args != ["--apply", "--confirm", "APPLY-PRIMARY-MOBILE"]:
+        return
+
+    async def execute():
+        from telegram import Bot
+        try:
+            from .bot import ENV_FILE, load_env
+        except ImportError:
+            from bot import ENV_FILE, load_env
+        bot = Bot(load_env(ENV_FILE)["BOT_TOKEN"])
+
+        async def sender(tg_id, text):
+            await bot.send_message(chat_id=tg_id, text=text)
+
+        return await apply_cohort(
+            service, get_link_by_email, sender, event_sent, mark_event_sent, time.time,
+        )
+
+    results = asyncio.run(execute())
+    print("Apply results:")
+    for email, status in results:
+        print(f"  {email}: {status}")
+
+
 def usage():
     print(
         """
@@ -356,6 +396,7 @@ HWID / устройства:
   karina-user disable ИМЯ
   karina-user enable ИМЯ
   karina-user delete ИМЯ
+  karina-user migrate-bundle-cohort --dry-run
 
 Примеры:
 
@@ -387,6 +428,7 @@ def main():
         "disable": cmd_disable, "enable": cmd_enable, "delete": cmd_delete,
         "delete-confirmed": cmd_delete_confirmed,
         "migrate-mobile": cmd_migrate_mobile,
+        "migrate-bundle-cohort": cmd_migrate_bundle_cohort,
     }
     handler = commands.get(sys.argv[1])
     if not handler:

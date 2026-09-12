@@ -364,3 +364,35 @@ Migration is always manual and processes one email. A dry-run may read XUI but
 performs no mutation. `--apply` creates/repairs the mobile credential and detaches
 the mobile inbound only after the external subscription has been verified.
 Neither deployment nor service startup invokes this command.
+
+### One-time primary/mobile cohort migration
+
+The reviewed one-time cohort command is restricted in code to `Vlad__K`,
+`Nikolay_p`, `Olga_K`, and `Sergey_B`. It always reports `Mikhail`, `Home`, and
+`Anastasia_A` as `EXCLUDED / untouched` and never looks them up or mutates them.
+The command requires `PRIMARY_INBOUND_IDS=2,3,4` and
+`MOBILE_INBOUND_IDS=5,10`; a mismatch blocks apply.
+
+Run the read-only report first:
+
+```bash
+karina-user migrate-bundle-cohort --dry-run
+```
+
+For every target it prints current primary/mobile inbound IDs, primary expiry,
+Telegram binding, primary HWID usage, planned changes, blocking reconciliation
+errors, and whether a completion message would be sent. Dry-run performs no XUI
+or SQLite writes and sends no Telegram messages.
+
+After separate review, apply requires an explicit guard phrase:
+
+```bash
+karina-user migrate-bundle-cohort --apply --confirm APPLY-PRIMARY-MOBILE
+```
+
+Apply reuses the normal mobile migration and reconciliation service, keeps the
+primary expiry and Telegram binding, sets the primary HWID limit to 4, and keeps
+the mobile credential at 50 GiB with unlimited HWID (`limitHwid=0`). Each client
+is verified before its user is notified. Successful notifications receive a
+persistent migration event marker, so retries do not resend them; a failed send
+is not marked and remains retryable.
