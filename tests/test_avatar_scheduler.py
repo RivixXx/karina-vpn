@@ -87,11 +87,15 @@ def test_scheduler_is_never_created_before_application_is_running():
 def test_scheduler_task_is_registered_and_cancelled_during_shutdown():
     class Task:
         cancelled = False
+        finished = False
         def cancel(self):
             self.cancelled = True
+        def done(self):
+            return self.finished
         def __await__(self):
             if False:
                 yield
+            self.finished = True
             return None
 
     task = Task()
@@ -104,12 +108,57 @@ def test_scheduler_task_is_registered_and_cancelled_during_shutdown():
     assert application.bot_data[SCHEDULER_TASK_KEY] is task
     run(stop_scheduler(application))
     assert task.cancelled is True
+    assert task.finished is True
     assert SCHEDULER_TASK_KEY not in application.bot_data
+    run(stop_scheduler(application))
+
+
+def test_run_polling_style_stop_then_shutdown_leaves_no_pending_task():
+    class Task:
+        cancelled = awaited = False
+        def done(self):
+            return self.awaited
+        def cancel(self):
+            self.cancelled = True
+        def __await__(self):
+            if False:
+                yield
+            self.awaited = True
+            return None
+
+    task = Task()
+    def create_task(coroutine, **kwargs):
+        coroutine.close()
+        return task
+    application = NS(running=True, create_task=create_task, bot_data={})
+    start_scheduler(application)
+    run(stop_scheduler(application))       # Application.stop
+    application.running = False
+    run(stop_scheduler(application))       # Application.shutdown fallback
+    assert task.cancelled and task.awaited and task.done()
+    assert SCHEDULER_TASK_KEY not in application.bot_data
+
+
+@pytest.mark.parametrize(("done", "cancelled"), [(True, False), (True, True)])
+def test_cleanup_is_safe_for_completed_or_cancelled_task(done, cancelled):
+    class Task:
+        def done(self): return done
+        def cancelled(self): return cancelled
+        def cancel(self): raise AssertionError("completed task must not be cancelled again")
+        def __await__(self):
+            if False: yield
+            if cancelled: raise __import__("asyncio").CancelledError
+            return None
+    application = NS(bot_data={SCHEDULER_TASK_KEY: Task()})
+    run(stop_scheduler(application))
+    assert application.bot_data == {}
 
 
 def test_application_lifecycle_starts_after_super_and_stops_before_super():
     import inspect
     start_source = inspect.getsource(AvatarApplication.start)
     stop_source = inspect.getsource(AvatarApplication.stop)
+    shutdown_source = inspect.getsource(AvatarApplication.shutdown)
     assert start_source.index("await super().start()") < start_source.index("start_scheduler(self)")
     assert stop_source.index("await stop_scheduler(self)") < stop_source.index("await super().stop()")
+    assert shutdown_source.index("await stop_scheduler(self)") < shutdown_source.index("await super().shutdown()")

@@ -1,7 +1,6 @@
 import json
 import logging
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, time as clock, timedelta
 from pathlib import Path
@@ -163,9 +162,14 @@ async def stop_scheduler(application):
     task = application.bot_data.pop(SCHEDULER_TASK_KEY, None)
     if task is None:
         return
-    task.cancel()
-    with suppress(asyncio.CancelledError):
+    if not task.done():
+        task.cancel()
+    try:
         await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        LOGGER.warning("Avatar scheduler terminated with an error", exc_info=True)
 
 
 class AvatarApplication(Application):
@@ -176,3 +180,8 @@ class AvatarApplication(Application):
     async def stop(self):
         await stop_scheduler(self)
         await super().stop()
+
+    async def shutdown(self):
+        # Idempotent fallback for run_polling teardown and partial-start failures.
+        await stop_scheduler(self)
+        await super().shutdown()
