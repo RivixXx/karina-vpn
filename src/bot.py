@@ -610,10 +610,15 @@ async def resolve_main_sticker(context):
     if cache.get("karina_main_sticker_file_id"):
         return cache["karina_main_sticker_file_id"]
     try:
-        sticker_set = await context.bot.get_sticker_set("KarinaVPN")
-        sticker = sticker_set.stickers[0]
-        cache["karina_main_sticker_file_id"] = sticker.file_id
-        return sticker.file_id
+        # PTB 20.8's StickerSet model predates fields returned by the current
+        # Bot API. _post returns the raw result dict before model conversion.
+        result = await context.bot._post("getStickerSet", data={"name": "KarinaVPN"})
+        stickers = result.get("stickers") if isinstance(result, dict) else None
+        file_id = stickers[0].get("file_id") if stickers and isinstance(stickers[0], dict) else None
+        if not isinstance(file_id, str) or not file_id:
+            raise ValueError("getStickerSet result has no first sticker file_id")
+        cache["karina_main_sticker_file_id"] = file_id
+        return file_id
     except Exception:
         LOGGER.warning("Unable to resolve first sticker from KarinaVPN", exc_info=True)
         return None

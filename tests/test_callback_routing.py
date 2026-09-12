@@ -384,15 +384,26 @@ def test_pending_request_cancel_requires_confirmation(bot):
 
 
 def test_main_sticker_resolves_first_item_and_caches_file_id(bot):
-    api = NS(get_sticker_set=AsyncMock(return_value=NS(stickers=[
-        NS(file_id="first"), NS(file_id="second"),
-    ])))
+    api = NS(_post=AsyncMock(return_value={"stickers": [
+        {"file_id": "first"}, {"file_id": "second"},
+    ]}))
     context = NS(bot=api, user_data={})
     assert run(bot["resolve_main_sticker"](context)) == "first"
     assert run(bot["resolve_main_sticker"](context)) == "first"
-    api.get_sticker_set.assert_awaited_once_with("KarinaVPN")
+    api._post.assert_awaited_once_with("getStickerSet", data={"name": "KarinaVPN"})
+    source = __import__("pathlib").Path("src/bot.py").read_text(encoding="utf-8")
+    resolver = source[source.index("async def resolve_main_sticker"):source.index("async def render_client_home")]
+    assert ".get_sticker_set" not in resolver and "StickerSet.de_json" not in resolver
 
 
 def test_main_sticker_failure_returns_none_without_breaking_cabinet(bot):
-    api = NS(get_sticker_set=AsyncMock(side_effect=RuntimeError("telegram")))
+    api = NS(_post=AsyncMock(side_effect=RuntimeError("telegram")))
+    assert run(bot["resolve_main_sticker"](NS(bot=api, user_data={}))) is None
+
+
+@pytest.mark.parametrize("result", [
+    {}, {"stickers": []}, {"stickers": [{}]}, {"stickers": "invalid"}, None,
+])
+def test_main_sticker_malformed_raw_result_falls_back(bot, result):
+    api = NS(_post=AsyncMock(return_value=result))
     assert run(bot["resolve_main_sticker"](NS(bot=api, user_data={}))) is None
