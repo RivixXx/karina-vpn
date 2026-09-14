@@ -146,6 +146,7 @@ def test_bot_has_no_manual_payment_confirmation():
     source = __import__("pathlib").Path("src/bot.py").read_text(encoding="utf-8")
     assert "Я оплатил" not in source
     assert "mark_paid(" not in source
+    assert "Ручное подтверждение отключено" in source
 
 
 def test_old_cancel_no_button_shows_current_completed_status(monkeypatch):

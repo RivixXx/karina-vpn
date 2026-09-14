@@ -2127,6 +2127,15 @@ async def callbacks(
         action, order_id = data.split(":", 1)
         try:
             orders = build_customer_order_service()
+            current = orders.billing.get_order(order_id)
+            provider_session = orders.billing.repository.get_payment_session(order_id)
+            if (provider_session is not None and current is not None
+                    and current.status is OrderStatus.PENDING):
+                await query.edit_message_text(
+                    "⏳ Этот заказ проверяет ЮKassa. Ручное подтверждение отключено — "
+                    "Карина активирует подписку только после успешного платежа."
+                )
+                return
             if action == "oa":
                 order, changed = orders.approve(order_id)
                 await query.edit_message_text("✅ Заявка подтверждена." if changed else "✅ Заявка уже подтверждена.")
