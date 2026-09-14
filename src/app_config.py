@@ -42,6 +42,9 @@ class KarinaConfig:
     avatar_chat_id: int | None = None
     avatar_dir: Path = Path("/opt/karina-vpn/avatar")
     avatar_state_file: Path = Path("/opt/karina-vpn/var/avatar-state.json")
+    yookassa_shop_id: str | None = None
+    yookassa_secret_key: str | None = field(default=None, repr=False)
+    yookassa_return_url: str | None = None
 
 
 def _optional_https_url(values, key):
@@ -170,4 +173,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         avatar_chat_id=avatar_chat_id,
         avatar_dir=Path(values.get("AVATAR_DIR", "/opt/karina-vpn/avatar")),
         avatar_state_file=Path(values.get("AVATAR_STATE_FILE", "/opt/karina-vpn/var/avatar-state.json")),
+        yookassa_shop_id=values.get("YOOKASSA_SHOP_ID", "").strip() or None,
+        yookassa_secret_key=values.get("YOOKASSA_SECRET_KEY", "").strip() or None,
+        yookassa_return_url=_optional_https_url(values, "YOOKASSA_RETURN_URL"),
     )

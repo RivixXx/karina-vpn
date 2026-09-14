@@ -1,0 +1,22 @@
+[Unit]
+Description=Karina VPN YooKassa webhook
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=karina-bot
+Group=karina-bot
+WorkingDirectory=/opt/karina-vpn
+EnvironmentFile=/etc/karina-vpn/config.env
+ExecStart=/opt/karina-vpn/.venv/bin/python -m src.payments.webhook --bind 127.0.0.1 --port 8091
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/karina-bot
+
+[Install]
+WantedBy=multi-user.target

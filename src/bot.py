@@ -1,3 +1,4 @@
+import asyncio
 import re
 import logging
 import secrets
@@ -33,7 +34,7 @@ try:
     from .services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
         CustomerOrderError, CustomerOrderService, ReferralService,
-        ReconciliationRequiredError, ValidationError,
+        ReconciliationRequiredError, TelegramBindingStore, ValidationError,
     )
     from .ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from .ui.connection import connection_view
@@ -44,6 +45,7 @@ try:
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from .payment_worker import ServiceApplication
     from .payment_delivery import deliver as deliver_outbox
+    from .payments import YooKassaClient, YooKassaError, YooKassaPaymentService
     from .legal import legal_view, load_legal_documents
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
@@ -55,7 +57,7 @@ except ImportError:  # Direct execution from the src directory.
     from services import (
         BillingAccessError, BillingError, BillingService, ClientServiceError,
         CustomerOrderError, CustomerOrderService, ReferralService,
-        ReconciliationRequiredError, ValidationError,
+        ReconciliationRequiredError, TelegramBindingStore, ValidationError,
     )
     from ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from ui.connection import connection_view
@@ -66,6 +68,7 @@ except ImportError:  # Direct execution from the src directory.
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from payment_worker import ServiceApplication
     from payment_delivery import deliver as deliver_outbox
+    from payments import YooKassaClient, YooKassaError, YooKassaPaymentService
     from legal import legal_view, load_legal_documents
 
 ENV_FILE = Path("/opt/karina-bot/.env")
@@ -96,16 +99,7 @@ def create_telegram_link(tg_id, email, username="", first_name=""):
 
 def bind_order_customer(tg_id, email):
     """Payment retries must never replace somebody else\'s binding."""
-    with closing(db_connect()) as db, db:
-        db.execute("BEGIN IMMEDIATE")
-        rows = db.execute("SELECT tg_id, email FROM telegram_links WHERE tg_id=? OR email=?",
-                          (tg_id, email)).fetchall()
-        if rows:
-            if len(rows) == 1 and rows[0][0] == tg_id and rows[0][1] == email:
-                return
-            raise ReconciliationRequiredError("Payment binding conflicts with existing ownership")
-        db.execute("INSERT INTO telegram_links(tg_id, email, linked_at) VALUES (?, ?, ?)",
-                   (tg_id, email, int(time.time())))
+    TelegramBindingStore(db_connect).create(tg_id, email)
 
 
 def build_customer_order_service():
@@ -947,6 +941,18 @@ async def render_support_home(update, context):
     await show_compound(
         update, context, screen_key="support", sticker=sticker,
         text=text, reply_markup=keyboard,
+    )
+
+
+def build_yookassa_payment_service():
+    config = CUSTOMER_CONFIG or load_config()
+    if not config.yookassa_shop_id or not config.yookassa_secret_key or not config.yookassa_return_url:
+        raise YooKassaError("YooKassa is not configured")
+    orders = build_customer_order_service()
+    return YooKassaPaymentService(
+        orders.billing,
+        YooKassaClient(config.yookassa_shop_id, config.yookassa_secret_key),
+        config.yookassa_return_url,
     )
 
 
@@ -1822,6 +1828,7 @@ def pending_request_view(order, plan, *, back_callback):
             "После проверки оплаты администратором срок обновится автоматически.\n"
             "Если уже оплатили, повторно платить не нужно.").replace(",", " ")
     return text, InlineKeyboardMarkup([
+        [InlineKeyboardButton("💳 Перейти к оплате", callback_data=f"bill_pay:{order.id}")],
         [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"order_status:{order.id}")],
         [InlineKeyboardButton("Изменить тариф", callback_data=f"order_change:{order.id}")],
         [InlineKeyboardButton("Отменить заявку", callback_data=f"order_cancel:{order.id}")],
@@ -1946,7 +1953,27 @@ async def callbacks(
     elif data.startswith("bill_plan:"):
         data = "tariff:" + data.split(":", 1)[1]
     elif data.startswith("bill_pay:"):
-        data = "order_status:" + data.split(":", 1)[1]
+        order_id = data.split(":", 1)[1]
+        try:
+            orders = build_customer_order_service()
+            order = orders.get_request(update.effective_user.id, order_id)
+            if order.status is not OrderStatus.PENDING:
+                labels = {OrderStatus.COMPLETED: "✅ Оплата подтверждена",
+                          OrderStatus.CANCELLED: "Заявка отменена",
+                          OrderStatus.FAILED: "Заявка не выполнена",
+                          OrderStatus.PAID: "Оплата получена, подписка обрабатывается"}
+                await show_text(update, context, labels[order.status], reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")]]))
+                return
+            link = await asyncio.to_thread(build_yookassa_payment_service().create_payment, order_id)
+            await show_text(update, context, "Перейдите на защищённую страницу ЮKassa для оплаты.",
+                            reply_markup=InlineKeyboardMarkup([
+                                [InlineKeyboardButton("💳 Оплатить", url=link.confirmation_url)],
+                                [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"order_status:{order_id}")],
+                            ]))
+        except (CustomerOrderError, BillingError, YooKassaError, sqlite3.Error):
+            await query.answer("Платёж временно недоступен", show_alert=True)
+        return
     elif data.startswith("bill_cancel:"):
         data = "order_cancel:" + data.split(":", 1)[1]
     elif data.startswith("order_cancel_no:"):

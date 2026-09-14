@@ -48,6 +48,22 @@ class BillingRepository:
                 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_provider_payment_unique
                     ON orders(provider_payment_id) WHERE provider_payment_id IS NOT NULL;
+                CREATE TABLE IF NOT EXISTS provider_payment_sessions (
+                    order_id TEXT PRIMARY KEY,
+                    provider TEXT NOT NULL,
+                    payment_id TEXT NOT NULL UNIQUE,
+                    confirmation_url TEXT NOT NULL,
+                    attempt INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending'
+                );
+                CREATE TABLE IF NOT EXISTS payment_operator_warnings (
+                    order_id TEXT NOT NULL,
+                    payment_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+                    resolved_at INTEGER,
+                    PRIMARY KEY(order_id, kind)
+                );
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(orders)")}
             if "order_kind" not in columns:
@@ -203,6 +219,50 @@ class BillingRepository:
                 "ORDER BY id DESC LIMIT 1", (tg_id,),
             ).fetchone()
         return self._order(row)
+
+    def get_payment_session(self, order_id):
+        with closing(self._connect()) as db:
+            return db.execute("SELECT * FROM provider_payment_sessions WHERE order_id=?",
+                              (order_id,)).fetchone()
+
+    def get_payment_session_by_payment_id(self, payment_id):
+        with closing(self._connect()) as db:
+            return db.execute("SELECT * FROM provider_payment_sessions WHERE payment_id=?",
+                              (payment_id,)).fetchone()
+
+    def save_payment_session(self, order_id, provider, payment_id, confirmation_url, attempt):
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT * FROM provider_payment_sessions WHERE order_id=?",
+                                  (order_id,)).fetchone()
+            if existing and existing["status"] == "pending":
+                return existing
+            db.execute("""INSERT INTO provider_payment_sessions
+                (order_id, provider, payment_id, confirmation_url, attempt, status)
+                VALUES (?, ?, ?, ?, ?, 'pending')
+                ON CONFLICT(order_id) DO UPDATE SET provider=excluded.provider,
+                payment_id=excluded.payment_id, confirmation_url=excluded.confirmation_url,
+                attempt=excluded.attempt, status='pending'""",
+                (order_id, provider, payment_id, confirmation_url, attempt))
+            db.execute("""UPDATE orders SET provider=?, provider_payment_id=?
+                WHERE order_id=? AND status='pending'""", (provider, payment_id, order_id))
+        return self.get_payment_session(order_id)
+
+    def set_payment_session_status(self, payment_id, status):
+        with closing(self._connect()) as db, db:
+            db.execute("UPDATE provider_payment_sessions SET status=? WHERE payment_id=?",
+                       (status, payment_id))
+
+    def record_receipt_warning(self, order_id, payment_id):
+        with closing(self._connect()) as db, db:
+            db.execute("""INSERT OR IGNORE INTO payment_operator_warnings
+                (order_id, payment_id, kind) VALUES (?, ?, 'npd_receipt_required')""",
+                (order_id, payment_id))
+
+    def get_receipt_warning(self, order_id):
+        with closing(self._connect()) as db:
+            return db.execute("""SELECT * FROM payment_operator_warnings
+                WHERE order_id=? AND kind='npd_receipt_required'""", (order_id,)).fetchone()
 
     def approve_pending(self, order_id, applied_at):
         """Finalize a manually confirmed order after provisioning succeeds."""

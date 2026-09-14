@@ -20,6 +20,10 @@ telegram = ModuleType("telegram")
 telegram.InlineKeyboardButton = Button
 telegram.InlineKeyboardMarkup = Markup
 telegram.Update = type("Update", (), {"ALL_TYPES": ()})
+telegram.BotCommand = type("BotCommand", (), {})
+telegram.BotCommandScopeDefault = type("BotCommandScopeDefault", (), {})
+telegram.BotCommandScopeAllPrivateChats = type("BotCommandScopeAllPrivateChats", (), {})
+telegram.MenuButtonCommands = type("MenuButtonCommands", (), {})
 constants = ModuleType("telegram.constants")
 constants.ChatType = NS(PRIVATE="private")
 constants.ParseMode = NS(MARKDOWN_V2="MarkdownV2")
@@ -29,7 +33,15 @@ extension.CallbackQueryHandler = type("CallbackQueryHandler", (), {})
 extension.CommandHandler = type("CommandHandler", (), {})
 extension.MessageHandler = type("MessageHandler", (), {})
 extension.ContextTypes = NS(DEFAULT_TYPE=object)
-extension.filters = NS(TEXT=object(), COMMAND=object())
+class Filter:
+    def __invert__(self):
+        return self
+
+    def __and__(self, other):
+        return self
+
+
+extension.filters = NS(TEXT=Filter(), COMMAND=Filter())
 sys.modules.setdefault("telegram", telegram)
 sys.modules.setdefault("telegram.constants", constants)
 sys.modules.setdefault("telegram.ext", extension)
@@ -115,10 +127,16 @@ def test_cancel_pending_order(monkeypatch):
     assert "Заявка отменена" in item.callback_query.edit_message_text.call_args.args[0]
 
 
-def test_payment_is_safe_placeholder_and_completed_status_is_visible(monkeypatch):
+def test_payment_opens_provider_link_and_completed_status_is_visible(monkeypatch):
     billing = NS(get_order=Mock(return_value=pending()))
+    create_payment = Mock()
+    monkeypatch.setattr(bot, "build_yookassa_payment_service", lambda: NS(create_payment=create_payment))
+    offload = AsyncMock(return_value=NS(confirmation_url="https://yoomoney.ru/pay/fixture"))
+    monkeypatch.setattr(bot.asyncio, "to_thread", offload)
     item = run(invoke(monkeypatch, "bill_pay:KV-SYNTHETIC", billing))
-    assert "платёжная ссылка в боте не подключена" in item.callback_query.edit_message_text.call_args.args[0]
+    offload.assert_awaited_once_with(create_payment, "KV-SYNTHETIC")
+    keyboard = item.callback_query.edit_message_text.call_args.kwargs["reply_markup"]
+    assert keyboard.inline_keyboard[0][0].url == "https://yoomoney.ru/pay/fixture"
     billing.get_order.return_value = pending(status=OrderStatus.COMPLETED)
     item = run(invoke(monkeypatch, "bill_pay:KV-SYNTHETIC", billing))
     assert "Оплата подтверждена" in item.callback_query.edit_message_text.call_args.args[0]
