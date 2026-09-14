@@ -144,3 +144,25 @@ def test_compound_to_confirmation_text_removes_sticker_and_menu():
     deleted = [item.kwargs["message_id"] for item in context.bot.delete_message.await_args_list]
     assert deleted == [10, 14, 11]
     context.bot.send_message.assert_awaited()
+
+
+@pytest.mark.parametrize("kind", ["text", "compound"])
+@pytest.mark.parametrize("old_edit_result", [None, "Message is not modified", "Message to edit not found"])
+def test_command_after_history_clear_always_sends_visible_screen(kind, old_edit_result):
+    update, context = fixture()
+    update.callback_query = None
+    update.message = NS(reply_text=AsyncMock(return_value=NS(message_id=30)))
+    context.user_data.update(karina_ui_message_id=11, karina_ui_kind=kind,
+        karina_ui_screen={"screen_key": "main", "content_type": kind,
+                          "primary_message_id": 11, "message_ids": [14, 11]})
+    if old_edit_result:
+        context.bot.edit_message_text.side_effect = RuntimeError(old_edit_result)
+    if kind == "compound":
+        run(show_compound(update, context, screen_key="main", sticker="s", text="home"))
+        context.bot.send_message.assert_awaited_once()
+        context.bot.send_sticker.assert_awaited_once()
+    else:
+        run(show_text(update, context, "welcome"))
+        update.message.reply_text.assert_awaited_once()
+    context.bot.edit_message_text.assert_not_awaited()
+    context.bot.delete_message.assert_not_awaited()

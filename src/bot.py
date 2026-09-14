@@ -44,6 +44,7 @@ try:
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from .payment_worker import ServiceApplication
     from .payment_delivery import deliver as deliver_outbox
+    from .legal import legal_view, load_legal_documents
 except ImportError:  # Direct execution from the src directory.
     from app_config import ConfigError, load_config
     from application import build_client_service
@@ -65,6 +66,7 @@ except ImportError:  # Direct execution from the src directory.
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from payment_worker import ServiceApplication
     from payment_delivery import deliver as deliver_outbox
+    from legal import legal_view, load_legal_documents
 
 ENV_FILE = Path("/opt/karina-bot/.env")
 DB_FILE = Path("/opt/karina-bot/karina.db")
@@ -947,6 +949,18 @@ async def render_support_home(update, context):
     )
 
 
+async def legal_command(update, context, section=None):
+    if not is_private_chat(update):
+        return
+    if section is None:
+        command = update.message.text.split()[0].split("@")[0].lstrip("/")
+        section = {"support": "contacts", "paysupport": "contacts"}.get(command, command)
+    text, keyboard = legal_view(
+        section, documents=load_legal_documents(), support_url=SUPPORT_URL,
+    )
+    await show_text(update, context, text, reply_markup=keyboard)
+
+
 async def render_support_faq(update, context, email, tg_id, slug):
     mobile_url = None
     device_slots = None
@@ -1717,6 +1731,7 @@ def membership_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📢 Подписаться на Karina VPN", url=REQUIRED_TG_CHAT_URL)],
         [InlineKeyboardButton("✅ Я подписался — проверить", callback_data="membership_check")],
+        [InlineKeyboardButton("📄 Документы и поддержка", callback_data="legal:home")],
     ])
 
 
@@ -1775,7 +1790,7 @@ def welcome_view():
         "работы при мобильных ограничениях. Управление — прямо в этом боте.",
         InlineKeyboardMarkup([[
             InlineKeyboardButton("🚀 Начать", callback_data="welcome_start")
-        ]]),
+        ], [InlineKeyboardButton("📄 Документы и поддержка", callback_data="legal:home")]]),
     )
 
 
@@ -1910,6 +1925,9 @@ async def callbacks(
 
     data = query.data
     if not isinstance(data, str):
+        return
+    if data in {"legal:home", "legal:terms", "legal:refunds", "legal:privacy", "legal:contacts"}:
+        await legal_command(update, context, section=data.split(":", 1)[1])
         return
     if re.fullmatch(r"payments:[0-9]{1,6}", data):
         await payment_admin(update, context, page=int(data.split(":", 1)[1]))
@@ -2433,6 +2451,9 @@ def main():
     app.bot_data["config"] = config
     app.bot_data["deliver_payment_effects"] = deliver_payment_effects
     app.add_handler(CommandHandler("payments", payment_admin))
+    app.add_handler(CommandHandler(
+        ["terms", "refunds", "privacy", "support", "paysupport"], legal_command,
+    ))
 
     app.add_handler(
         CommandHandler(

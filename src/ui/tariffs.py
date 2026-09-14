@@ -51,6 +51,7 @@ def tariff_detail_view(code, *, back_callback="tariffs"):
     text += "\n\nПодписка будет активирована или продлена после подтверждения платежа администратором."
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Перейти к оплате", callback_data=f"order:{plan.id}")],
+        [InlineKeyboardButton("📄 Условия и возвраты", callback_data="legal:home")],
         [InlineKeyboardButton("← Другой тариф", callback_data=back_callback)],
         [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")],
     ])

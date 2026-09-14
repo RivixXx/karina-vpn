@@ -90,6 +90,7 @@ def support_home_view(support_url=None, knowledge_base_url=None):
     ])
     if knowledge_base_url:
         rows.append([InlineKeyboardButton("🌐 Полная база знаний", url=knowledge_base_url)])
+    rows.append([InlineKeyboardButton("📄 Документы и возвраты", callback_data="legal:home")])
     rows.append([InlineKeyboardButton("← Назад в меню", callback_data="client_home")])
     return text, InlineKeyboardMarkup(rows)
 

@@ -38,7 +38,7 @@ def test_support_home_has_all_faqs_operator_and_no_fake_kb():
     assert callbacks(keyboard) == [
         "support_faq:network", "support_faq:antiblock", "support_faq:devices",
         "support_faq:payment", "support_faq:speed", "support_faq:quicklaunch",
-        "support_faq:transfer", "client_home",
+        "support_faq:transfer", "legal:home", "client_home",
     ]
     assert urls(keyboard) == ["https://t.me/support"]
 

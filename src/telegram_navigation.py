@@ -75,19 +75,8 @@ async def show_text(update, context, text, *, reply_markup=None, parse_mode=None
                 _remember(context, query.message, "text")
                 return query.message
             raise
-    remembered_id = context.user_data.get(UI_MESSAGE_KEY)
-    if not query and remembered_id is not None:
-        try:
-            message = await context.bot.edit_message_text(
-                chat_id=update.effective_chat.id, message_id=remembered_id,
-                text=text, reply_markup=reply_markup, parse_mode=parse_mode,
-            )
-            _remember(context, message, "text")
-            return message
-        except Exception as exc:
-            if _not_modified(exc):
-                return None
-            LOGGER.info("Previous Karina UI message is unavailable; creating a new one")
+    # A command is a fresh entry point. Telegram may still accept edits to a
+    # message hidden by client-side history clearing, without showing it again.
     if query:
         message = await context.bot.send_message(
             chat_id=update.effective_chat.id, text=text,
@@ -128,7 +117,7 @@ async def show_compound(update, context, *, screen_key, text, reply_markup=None,
                         sticker=None, parse_mode=None):
     existing = current_screen(context) or {}
     query = getattr(update, "callback_query", None)
-    if (existing.get("screen_key") == screen_key
+    if (query and existing.get("screen_key") == screen_key
             and existing.get("content_type") == "compound"):
         primary = existing.get("primary_message_id")
         try:
@@ -147,7 +136,7 @@ async def show_compound(update, context, *, screen_key, text, reply_markup=None,
                 return None
             LOGGER.warning("Unable to refresh compound Karina UI screen", exc_info=True)
 
-    old_ids = tuple(existing.get("message_ids", ()))
+    old_ids = tuple(existing.get("message_ids", ())) if query else ()
     sticker_message = None
     if sticker:
         try:
