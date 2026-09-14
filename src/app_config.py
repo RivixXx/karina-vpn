@@ -89,7 +89,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
     if any(value <= 0 for value in inbound_ids):
         raise ConfigError("INBOUND_IDS должен содержать только положительные числа")
     try:
-        default_hwid_limit = int(values.get("DEFAULT_HWID_LIMIT", "2"))
+        default_hwid_limit = int(values.get("DEFAULT_HWID_LIMIT", "5"))
         if values.get("MOBILE_INBOUND_IDS", "").strip():
             mobile_inbound_ids = tuple(
                 int(item.strip()) for item in values["MOBILE_INBOUND_IDS"].split(",")

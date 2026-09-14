@@ -121,6 +121,7 @@ class YooKassaPaymentService:
             raise YooKassaError("Unknown order")
         self._verify(payment, order, payment_id)
         if order.status is OrderStatus.COMPLETED:
+            self.billing.repository.set_payment_session_status(payment_id, "succeeded")
             return False
         if order.status is OrderStatus.PENDING:
             try:

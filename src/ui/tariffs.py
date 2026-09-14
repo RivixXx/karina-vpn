@@ -48,7 +48,7 @@ def tariff_detail_view(code, *, back_callback="tariffs"):
             f"Стоимость: {plan.price_rub:,} ₽\n≈ {monthly} ₽ в месяц".replace(",", " "))
     if saving:
         text += f"\n\nЭкономия: {saving} ₽\nпо сравнению с помесячной оплатой."
-    text += "\n\nПодписка будет активирована или продлена после подтверждения платежа администратором."
+    text += "\n\nПосле успешной оплаты Карина сама активирует или продлит подписку."
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("💳 Перейти к оплате", callback_data=f"order:{plan.id}")],
         [InlineKeyboardButton("📄 Условия и возвраты", callback_data="legal:home")],

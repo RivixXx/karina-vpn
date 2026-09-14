@@ -390,7 +390,7 @@ def format_client_profile(client: ClientInfo) -> str:
         f"├ 📊 Использовано: *{markdown_v2_escape(bytes_to_human(client.used_traffic_bytes))}*\n"
         f"├ 🎚 Лимит: *{markdown_v2_escape(traffic_limit_text(client.total_traffic_bytes))}*\n"
         f"└ 🛡 VPN: {icon} *{markdown_v2_escape(status)}*\n\n"
-        "Защищённое подключение для ваших устройств."
+        "Защищённое подключение для ваших устройств\\."
     )
 
 
@@ -738,6 +738,7 @@ async def render_client_home(update, email, context=None):
             keyboard = cabinet_keyboard(
                 news_url=getattr(CUSTOMER_CONFIG, "news_channel_url", None),
                 support_url=SUPPORT_URL,
+                donation_url=DONATION_URL,
             )
 
     if context is not None:
@@ -905,13 +906,17 @@ async def payment_admin(update, context, order_id=None, page=0):
             await show_text(update, context, "Заявка не найдена")
             return
         operation = repository.get_operation(order.id)
+        payment_session = repository.get_payment_session(order.id)
         text = (f"💳 Заявка №{order.id}\nTelegram ID: {order.tg_id}\n"
                 f"Срок: {order.days} дней\nСумма: {order.amount_rub} ₽\nСтатус: {order.status.value}")
         if operation:
             target = datetime.fromtimestamp(operation["target_expiry_ms"] / 1000, MOSCOW_TIMEZONE)
             text += f"\nДата по операции: {target:%d.%m.%Y %H:%M}\nПоследняя ошибка: {operation['last_error'] or 'нет'}"
         rows = []
-        if order.status is OrderStatus.PENDING:
+        if order.status is OrderStatus.PENDING and payment_session:
+            text += ("\n\n⏳ ЮKassa ещё не подтвердила оплату. "
+                     "Ничего нажимать не нужно — статус обновится автоматически.")
+        elif order.status is OrderStatus.PENDING:
             text += "\n\nПодтверждайте только после проверки фактической оплаты."
             rows.append([InlineKeyboardButton("✅ Подтвердить оплату", callback_data=f"oa:{order.id}"),
                          InlineKeyboardButton("❌ Отклонить", callback_data=f"or:{order.id}")])
@@ -1257,15 +1262,31 @@ async def admin_user(update, email):
 
 
 async def admin_bundle_user(update, email, notice=None):
+    query = update.callback_query
+
+    async def render_profile_text(text, reply_markup=None):
+        message = getattr(query, "message", None)
+        if message is not None and message.text is None:
+            await message.delete()
+            await update.effective_chat.send_message(
+                text,
+                reply_markup=reply_markup,
+            )
+        else:
+            await query.edit_message_text(
+                text,
+                reply_markup=reply_markup,
+            )
+
     try:
         service = build_client_service()
         bundle = service.get_client_bundle(email)
         inbound_names = service.get_primary_inbound_names(email) if bundle else ()
     except EXPECTED_SERVICE_ERRORS as exc:
-        await update.callback_query.edit_message_text(safe_user_error(exc, admin=True))
+        await render_profile_text(safe_user_error(exc, admin=True))
         return
     if bundle is None:
-        await update.callback_query.edit_message_text("Пользователь больше не существует")
+        await render_profile_text("Пользователь больше не существует")
         return
     traffic = None
     traffic_unavailable = False
@@ -1293,7 +1314,7 @@ async def admin_bundle_user(update, email, notice=None):
         [InlineKeyboardButton("🗑 Удалить", callback_data=f"udel:{ref_id}")],
         [InlineKeyboardButton("⬅ Назад", callback_data="admin_users")],
     ])
-    await update.callback_query.edit_message_text(
+    await render_profile_text(
         ((notice + "\n\n") if notice else "")
         + format_bundle_profile(bundle, traffic, inbound_names, traffic_unavailable),
         reply_markup=InlineKeyboardMarkup(rows),
@@ -1348,13 +1369,53 @@ async def admin_ref_callback(update, context, data):
                 text = safe_user_error(exc, admin=True)
         else:
             try:
-                url = service.reissue_bundle_connection(email)
+                page_url = service.reissue_bundle_connection(email)
+                client = service.get_client(email)
+                if client is None or not client.sub_id:
+                    raise ClientServiceError("SUB_ID пользователя недоступен")
+
+                subscription_url = f"{service.config.sub_base}/{client.sub_id}"
+                qr_url = page_url[:-5] + ".png" if page_url.endswith(".html") else None
+                if not qr_url:
+                    raise ClientServiceError("QR-код временно недоступен")
+
             except EXPECTED_SERVICE_ERRORS as exc:
-                await query.edit_message_text(safe_user_error(exc, admin=True), reply_markup=back)
+                await query.edit_message_text(
+                    safe_user_error(exc, admin=True),
+                    reply_markup=back,
+                )
                 return
-            if url:
-                rows.insert(0, [InlineKeyboardButton("💗 Подключить Карина VPN", url=url)])
-            text = "✅ Подключение перевыпущено"
+
+            text = (
+                "✅ Подключение перевыпущено\n\n"
+                f"👤 {email}\n"
+                f"🔗 Подписка готова:\n{subscription_url}"
+            )
+
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 Открыть подписку", url=subscription_url)],
+                [
+                    InlineKeyboardButton(
+                        "🌐 Открыть страницу подключения",
+                        url=page_url,
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Профиль",
+                        callback_data=f"u:{ref_id}",
+                    )
+                ],
+            ])
+
+            await show_photo(
+                update,
+                context,
+                qr_url,
+                caption=text,
+                reply_markup=keyboard,
+            )
+            return
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows))
     elif action == "udel":
         context.user_data["delete_confirmation"] = {
@@ -2276,8 +2337,11 @@ async def callbacks(
         try:
             service = build_client_service()
             page = service.reissue_bundle_connection(email)
-            mobile_url = service.get_mobile_subscription_url(email)
-            text, keyboard = connection_view(page, mobile_url)
+            client = service.get_client(email)
+            if client is None or not client.sub_id:
+                raise ClientServiceError("SUB_ID пользователя недоступен")
+            subscription_url = f"{service.config.sub_base}/{client.sub_id}"
+            text, keyboard = connection_view(subscription_url, page)
             sticker = await resolve_connection_sticker(context)
             await show_compound(
                 update, context, screen_key="connection", sticker=sticker,

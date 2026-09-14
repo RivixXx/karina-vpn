@@ -68,7 +68,8 @@ def test_connection_and_platform_navigation_hide_missing_optional_urls():
         "https://connect.example.test/user.html", "https://sub.example.test/mobile",
     )
     assert callbacks(connection) == ["client_qr", "connect_video", "client_home"]
-    assert "ПОДКЛЮЧЕНИЕ ГОТОВО • Карина VPN" in text
+    assert "Карина на связи" in text
+    assert "добавьте её в приложении" in text
     assert "двойной QR" not in text
     assert any(getattr(button, "url", None) == "https://connect.example.test/user.html"
                for row in connection.inline_keyboard for button in row)
@@ -135,8 +136,11 @@ def test_cabinet_branded_button_layout_uses_existing_callbacks():
                for row in keyboard.inline_keyboard for button in row)
     assert callbacks(keyboard) == [
         "client_connect", "tariffs", "client_devices", "connect_help",
-        "client_referral", "client_support", "client_donation", "client_home",
+        "client_referral", "client_support", "client_home",
     ]
+
+    with_donation = cabinet_keyboard(donation_url="https://example.test/support")
+    assert "client_donation" in callbacks(with_donation)
 
 
 def test_stale_binding_is_preserved_and_recoverable():

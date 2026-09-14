@@ -116,6 +116,7 @@ def test_webhook_refetches_and_applies_verified_payment_once(payment_setup):
     assert service.handle_webhook({"object": {"id": "pay_1"}}) is True
     assert service.handle_webhook({"object": {"id": "pay_1"}}) is False
     assert repo.get_order(order.id).status is OrderStatus.COMPLETED
+    assert repo.get_payment_session(order.id)["status"] == "succeeded"
     assert [call[0] for call in transport.calls] == ["GET", "GET"]
     warning = repo.get_receipt_warning(order.id)
     assert warning["payment_id"] == "pay_1" and warning["resolved_at"] is None

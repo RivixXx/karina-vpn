@@ -6,6 +6,7 @@ STATE_ROOT=/var/lib/karina-hardening
 BOT_USER=karina-bot
 BOT_GROUP=karina-bot
 BOT_DB=/opt/karina-bot/karina.db
+BOT_DB_DIR=/opt/karina-bot
 XUI_DB=/etc/x-ui/x-ui.db
 LEGAL=/etc/karina-vpn/legal.json
 NGINX_SITE=/etc/nginx/sites-available/vpn.parsekk.ru
@@ -57,7 +58,7 @@ snapshot() {
       install -D -m 600 /dev/null "$STATE$path.absent"
     fi
   done
-  stat -c '%a %U %G %n' "$BOT_DB" "$XUI_DB" "$LEGAL" > "$STATE/file-modes.before"
+  stat -c '%a %U %G %n' "$BOT_DB_DIR" "$BOT_DB" "$XUI_DB" "$LEGAL" > "$STATE/file-modes.before"
   getent passwd "$BOT_USER" >/dev/null || install -m 600 /dev/null "$STATE/bot-user.absent"
   getent group "$BOT_GROUP" >/dev/null || install -m 600 /dev/null "$STATE/bot-group.absent"
   printf '%s\n' "$STATE" > "$STATE_ROOT/latest"
@@ -87,6 +88,8 @@ apply() {
   trap 'rc=$?; trap - ERR; rollback "$STATE"; exit "$rc"' ERR
   getent group "$BOT_GROUP" >/dev/null || groupadd --system "$BOT_GROUP"
   getent passwd "$BOT_USER" >/dev/null || useradd --system --gid "$BOT_GROUP" --home-dir /nonexistent --shell /usr/sbin/nologin "$BOT_USER"
+  chown root:"$BOT_GROUP" "$BOT_DB_DIR"
+  chmod 0770 "$BOT_DB_DIR"
   chown "$BOT_USER:$BOT_GROUP" "$BOT_DB" "$LEGAL"
   chmod 0600 "$BOT_DB" "$XUI_DB" "$LEGAL"
   install -m 0644 "$ROOT/deploy/systemd/karina-bot-hardened.service" /etc/systemd/system/karina-bot.service
