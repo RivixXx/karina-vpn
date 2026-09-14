@@ -68,6 +68,20 @@ def test_approved_documents_show_exact_text_and_operator(tmp_path):
     assert load_legal_documents(path) == {}
 
 
+def test_public_contact_fallback_is_validated_and_shown(tmp_path):
+    data = {key: f"Reviewed {key}" for key in
+            ("operator", "version", "contacts", "terms", "refunds", "privacy")}
+    data.update(published=True, support_url="https://t.me/example_support")
+    path = tmp_path / "legal.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    text, keyboard = legal_view("contacts", documents=load_legal_documents(path))
+    assert data['support_url'] in text
+    assert keyboard.inline_keyboard[0][0].url == data['support_url']
+    data['support_url'] = 'javascript:invalid'
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert load_legal_documents(path) == {}
+
+
 @pytest.mark.parametrize("linked", [False, True])
 def test_start_reopens_screen_after_clearing_history(monkeypatch, linked):
     monkeypatch.setattr(bot, "ADMIN_TG_ID", 99)

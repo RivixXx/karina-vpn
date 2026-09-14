@@ -2436,7 +2436,7 @@ def main():
     REQUIRED_TG_CHAT_URL = config.required_tg_chat_url
     REQUIRED_MEMBERSHIP_MODE = config.required_membership_mode
     CUSTOMER_CONFIG = config
-    SUPPORT_URL = config.support_url
+    SUPPORT_URL = config.support_url or load_legal_documents().get("support_url")
     init_db()
     BillingRepository(DB_FILE).init_schema()
     ReferralRepository(DB_FILE).init_schema()

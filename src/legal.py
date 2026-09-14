@@ -2,6 +2,7 @@
 import json
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -23,6 +24,13 @@ def load_legal_documents(path=LEGAL_FILE):
                 raise ValueError("Missing or oversized public legal field")
         if len(documents["operator"]) > 400 or len(documents["version"]) > 80:
             raise ValueError("Oversized legal heading")
+        support_url = documents.get("support_url")
+        if support_url is not None:
+            if not isinstance(support_url, str):
+                raise ValueError("Invalid public support URL")
+            parsed = urlparse(support_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError("Invalid public support URL")
         return documents
     except FileNotFoundError:
         return {}
@@ -33,6 +41,7 @@ def load_legal_documents(path=LEGAL_FILE):
 
 def legal_view(section, *, documents=None, support_url=None):
     documents = documents or {}
+    support_url = support_url or documents.get("support_url")
     rows = []
     if section == "home":
         text = "📄 Документы и поддержка • Карина VPN\n\nВыберите раздел."
