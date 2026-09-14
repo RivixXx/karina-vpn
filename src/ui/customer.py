@@ -39,10 +39,10 @@ def format_cabinet(bundle, mobile_traffic, *, traffic_unavailable=False, now_ms=
     icon = "🟢" if protection == "Активна" else "🔴"
     return (f"💖 КАРИНА VPN • Личный кабинет\n━━━━━━━━━━━━━━━━━━━━━━\n"
             f"{identity}\n{icon} Статус: {status}\n\n"
-            f"📊 Трафик «Антиглушилка»:\n{mobile}\n\n"
+            f"📊 Трафик резервного мобильного подключения:\n{mobile}\n\n"
             f"📱 Подключено устройств: {primary.device_count} из {limit}\n"
             f"🛡 Защита: {protection}\n\n"
-            "💡 Чтобы начать пользоваться интернетом без ограничений,\n"
+            "Чтобы открыть параметры подключения,\n"
             "нажмите «Получить подключение» ниже.")
 
 
@@ -54,7 +54,8 @@ def cabinet_keyboard(*, news_url=None, support_url=None):
         [InlineKeyboardButton("📖 Как подключить", callback_data="connect_help"),
          InlineKeyboardButton("👥 Пригласить друга", callback_data="client_referral")],
         [InlineKeyboardButton("💬 Поддержка", callback_data="client_support"),
-         InlineKeyboardButton("🔄 Обновить", callback_data="client_home")],
+         InlineKeyboardButton("💝 Поддержать проект", callback_data="client_donation")],
+        [InlineKeyboardButton("🔄 Обновить", callback_data="client_home")],
     ]
     return InlineKeyboardMarkup(rows)
 

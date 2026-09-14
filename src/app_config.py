@@ -30,6 +30,7 @@ class KarinaConfig:
     connect_video_path: Path = Path("/opt/karina-vpn/avatar/video_1.mp4")
     news_channel_url: str | None = None
     support_url: str | None = None
+    donation_url: str | None = None
     telegraph_android_url: str | None = None
     telegraph_ios_url: str | None = None
     telegraph_windows_url: str | None = None
@@ -157,6 +158,7 @@ def load_config(path: Path | str = "/etc/karina-vpn/config.env") -> KarinaConfig
         connect_video_path=Path(values.get("CONNECT_VIDEO_PATH", "/opt/karina-vpn/avatar/video_1.mp4")),
         news_channel_url=_optional_https_url(values, "NEWS_CHANNEL_URL"),
         support_url=_optional_https_url(values, "SUPPORT_URL"),
+        donation_url=_optional_https_url(values, "DONATION_URL"),
         telegraph_android_url=_optional_https_url(values, "TELEGRAPH_ANDROID_URL"),
         telegraph_ios_url=_optional_https_url(values, "TELEGRAPH_IOS_URL"),
         telegraph_windows_url=_optional_https_url(values, "TELEGRAPH_WINDOWS_URL"),

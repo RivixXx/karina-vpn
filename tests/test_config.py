@@ -34,6 +34,14 @@ def test_valid_config_and_normalization(tmp_path):
     assert config.default_hwid_limit == 2
 
 
+def test_optional_donation_url_is_validated(tmp_path):
+    assert load_config(write_config(tmp_path)).donation_url is None
+    config = load_config(write_config(tmp_path, DONATION_URL="https://donate.example.test/karina"))
+    assert config.donation_url == "https://donate.example.test/karina"
+    with pytest.raises(ConfigError, match="DONATION_URL"):
+        load_config(write_config(tmp_path, DONATION_URL="http://unsafe.example.test"))
+
+
 def test_comments_empty_lines_and_quotes(tmp_path):
     config = load_config(write_config(
         tmp_path, XUI_USER='"fixture_user"', XUI_PASS="'fixture_password'",

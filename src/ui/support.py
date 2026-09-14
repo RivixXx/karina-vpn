@@ -9,13 +9,13 @@ FAQS = {
         "3️⃣ Если интернет работает — снова включите VPN.\n"
         "4️⃣ Обновите подписку или профиль в Happ, если эта команда доступна.\n"
         "5️⃣ Попробуйте другой обычный сервер.\n"
-        "6️⃣ В мобильной сети попробуйте «Карина против глушилок».\n\n"
+        "6️⃣ В мобильной сети попробуйте резервное подключение.\n\n"
         "Если интернет не работает даже при выключенном VPN, проблема, скорее всего, "
         "не связана с Карина VPN.",
     ),
     "antiblock": (
-        "❓ Что такое «Антиглушилка»?",
-        "«Карина против глушилок» — специальное подключение для ситуаций, когда "
+        "❓ Что такое резервное мобильное подключение?",
+        "Это дополнительное подключение для ситуаций, когда "
         "обычный VPN не соединяется или мобильный оператор ограничивает доступ.\n\n"
         "Используйте его, если обычные серверы не подключаются, интернет без VPN "
         "работает, проблемы возникают в мобильной сети или во время ограничений связи.\n\n"
@@ -40,7 +40,7 @@ FAQS = {
         "2. Переключитесь между Wi-Fi и мобильной сетью.\n"
         "3. Проверьте скорость без VPN.\n"
         "4. Перезапустите подключение Happ.\n"
-        "5. При мобильных ограничениях попробуйте «Карина против глушилок».\n\n"
+        "5. В мобильной сети попробуйте резервное подключение.\n\n"
         "Скорость зависит от сети, маршрута и нагрузки.",
     ),
     "quicklaunch": (
@@ -66,7 +66,7 @@ def support_home_view(support_url=None, knowledge_base_url=None):
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Перед обращением к оператору загляните в ответы на популярные вопросы:\n\n"
         "├ ❓ 1. VPN подключен, но интернет не работает\n"
-        "├ ❓ 2. Что такое «Антиглушилка» и когда её включать?\n"
+        "├ ❓ 2. Что такое резервное мобильное подключение?\n"
         "├ ❓ 3. Как подключить ПК, Smart TV или второй телефон?\n"
         "├ ❓ 4. Оплата списалась, но подписка не обновилась\n"
         "├ ❓ 5. Низкая скорость или зависает видео — что делать?\n"
@@ -81,7 +81,7 @@ def support_home_view(support_url=None, knowledge_base_url=None):
         rows.append([InlineKeyboardButton("✍️ Написать оператору", url=support_url)])
     rows.extend([
         [InlineKeyboardButton("❓ 1. Не грузит сеть", callback_data="support_faq:network"),
-         InlineKeyboardButton("❓ 2. Антиглушилка", callback_data="support_faq:antiblock")],
+         InlineKeyboardButton("❓ 2. Резервное", callback_data="support_faq:antiblock")],
         [InlineKeyboardButton("❓ 3. Подключить ПК", callback_data="support_faq:devices"),
          InlineKeyboardButton("❓ 4. Проблема с оплатой", callback_data="support_faq:payment")],
         [InlineKeyboardButton("❓ 5. Медленная скорость", callback_data="support_faq:speed"),
@@ -95,6 +95,29 @@ def support_home_view(support_url=None, knowledge_base_url=None):
     return text, InlineKeyboardMarkup(rows)
 
 
+def donation_view(donation_url=None, support_url=None):
+    text = (
+        "💝 ДОБРОВОЛЬНАЯ ПОДДЕРЖКА • Карина VPN\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Вы можете добровольно поддержать разработку и обслуживание проекта. "
+        "Это не покупка и не продление подписки: поддержка не начисляет дни, "
+        "трафик или доступ к VPN.\n\n"
+    )
+    rows = []
+    if donation_url:
+        text += "Размер поддержки вы выбираете на внешней странице."
+        rows.append([InlineKeyboardButton("💝 Поддержать проект", url=donation_url)])
+    else:
+        text += "Способ поддержки пока не настроен. Заказ и платёж не создаются."
+        if support_url:
+            rows.append([InlineKeyboardButton("✍️ Задать вопрос оператору", url=support_url)])
+    rows.extend([
+        [InlineKeyboardButton("📄 Порядок возврата", callback_data="legal:refunds")],
+        [InlineKeyboardButton("← Назад в меню", callback_data="client_home")],
+    ])
+    return text, InlineKeyboardMarkup(rows)
+
+
 def faq_view(slug, *, support_url=None, mobile_url=None, device_slots=None, pending_order=None):
     title, body = FAQS[slug]
     if slug == "devices" and device_slots is not None:
@@ -105,7 +128,7 @@ def faq_view(slug, *, support_url=None, mobile_url=None, device_slots=None, pend
                  if pending_order else "\n\nАктивной заявки, ожидающей подтверждения, нет.")
     rows = []
     if slug in {"network", "antiblock", "speed"} and mobile_url:
-        rows.append([InlineKeyboardButton("🛡 Карина против глушилок", url=mobile_url)])
+        rows.append([InlineKeyboardButton("📶 Резервное подключение", url=mobile_url)])
     if slug == "devices":
         rows.extend([
             [InlineKeyboardButton("🚀 Получить подключение", callback_data="client_connect")],

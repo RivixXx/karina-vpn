@@ -39,7 +39,7 @@ try:
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
-    from .ui.support import FAQS, faq_view, support_home_view
+    from .ui.support import FAQS, donation_view, faq_view, support_home_view
     from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from .payment_worker import ServiceApplication
@@ -61,7 +61,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
-    from ui.support import FAQS, faq_view, support_home_view
+    from ui.support import FAQS, donation_view, faq_view, support_home_view
     from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from payment_worker import ServiceApplication
@@ -73,6 +73,7 @@ DB_FILE = Path("/opt/karina-bot/karina.db")
 
 LOGGER = logging.getLogger(__name__)
 SUPPORT_URL = None  # Populated from typed configuration at startup.
+DONATION_URL = None  # Optional external page; never creates a subscription order.
 EXPECTED_SERVICE_ERRORS = (ConfigError, XUIError, ClientServiceError)
 EXPECTED_BILLING_ERRORS = (BillingError, sqlite3.Error)
 
@@ -395,7 +396,7 @@ def format_client_profile(client: ClientInfo) -> str:
         f"├ 📊 Использовано: *{markdown_v2_escape(bytes_to_human(client.used_traffic_bytes))}*\n"
         f"├ 🎚 Лимит: *{markdown_v2_escape(traffic_limit_text(client.total_traffic_bytes))}*\n"
         f"└ 🛡 VPN: {icon} *{markdown_v2_escape(status)}*\n\n"
-        "✨ _Свобода быть онлайн_"
+        "Защищённое подключение для ваших устройств."
     )
 
 
@@ -521,7 +522,7 @@ def format_bundle_profile(
     lines.extend(f"🇩🇪 {name}" for name in inbound_names)
     if not inbound_names:
         lines.append("Нет активных подключений")
-    lines.extend(["", "📱 Карина против глушилок"])
+    lines.extend(["", "📱 Резервное мобильное подключение"])
     if bundle.mobile is None:
         lines.append("Не подключена")
     elif traffic_unavailable or mobile_traffic is None:
@@ -671,7 +672,7 @@ def format_user_cabinet(bundle, mobile_traffic, traffic_unavailable=False, now_m
     if expiry:
         lines.append(expiry)
     lines.extend(["", f"📱 Устройства: {primary.device_count} / {primary.device_limit or '∞'}",
-                  "", "📱 Карина против глушилок"])
+                  "", "📱 Резервное мобильное подключение"])
     if bundle.mobile is None:
         lines.append("Не подключена")
     elif traffic_unavailable or mobile_traffic is None:
@@ -804,7 +805,7 @@ def format_referral_home(stats, referral_url):
     return (
         "👥 ПРИГЛАСИ ДРУГА • Карина VPN\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Получайте бонусы за друзей, которые начнут пользоваться Карина VPN 💗\n\n"
+        "Пригласите друга по персональной ссылке и получите бонус после его первой оплаты.\n\n"
         "⚙️ Как это работает?\n\n"
         "1️⃣ Отправьте другу свою персональную ссылку.\n"
         "2️⃣ Друг запускает Карина VPN и оформляет подписку.\n"
@@ -815,7 +816,7 @@ def format_referral_home(stats, referral_url):
         f"✅ Оплатили: {stats['qualified']}\n"
         f"🎁 Заработано: {stats['earned_days']} дней\n\n"
         f"🔗 Ваша реферальная ссылка:\n{referral_url}\n\n"
-        "💡 Чем больше друзей подключается, тем дольше вы пользуетесь Карина VPN."
+        "Условия бонуса: +3 дня за первую подтверждённую оплату приглашённого пользователя."
     )
 
 
@@ -855,7 +856,7 @@ async def render_referral_home(update, context, tg_id):
     referral_url = f"https://t.me/{bot_user.username}?start=ref_{profile['referral_code']}"
     share_url = "https://t.me/share/url?" + urlencode({
         "url": referral_url,
-        "text": "Я пользуюсь Карина VPN 💗\nПопробуй тоже — вот моя ссылка:",
+        "text": "Персональная ссылка-приглашение в Карина VPN:",
     })
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📤 Поделиться с друзьями", url=share_url)],
@@ -947,6 +948,11 @@ async def render_support_home(update, context):
         update, context, screen_key="support", sticker=sticker,
         text=text, reply_markup=keyboard,
     )
+
+
+async def render_donation(update, context):
+    text, keyboard = donation_view(DONATION_URL, SUPPORT_URL)
+    await show_text(update, context, text, reply_markup=keyboard)
 
 
 async def legal_command(update, context, section=None):
@@ -1785,7 +1791,7 @@ async def render_tariffs(update, back_callback=None, context=None):
 
 def welcome_view():
     return (
-        "💗 Карина VPN\n\nБыстрый и простой VPN для ваших устройств.\n\n"
+        "💗 Карина VPN\n\nVPN-подключение для ваших устройств.\n\n"
         "Одна подписка включает обычные серверы и отдельные подключения для "
         "работы при мобильных ограничениях. Управление — прямо в этом боте.",
         InlineKeyboardMarkup([[
@@ -1947,6 +1953,9 @@ async def callbacks(
         data = "order_status:" + data.split(":", 1)[1]
     if data == "client_support":
         await render_support_home(update, context)
+        return
+    if data == "client_donation":
+        await render_donation(update, context)
         return
     if data == "client_home" and not get_link_by_tg(update.effective_user.id):
         text, keyboard = welcome_view()
@@ -2427,7 +2436,7 @@ async def callbacks(
 
 def main():
     global BOT_TOKEN, ADMIN_TG_ID, REQUIRED_TG_CHAT_ID, REQUIRED_TG_CHAT_URL
-    global REQUIRED_MEMBERSHIP_MODE, CUSTOMER_CONFIG, SUPPORT_URL
+    global REQUIRED_MEMBERSHIP_MODE, CUSTOMER_CONFIG, SUPPORT_URL, DONATION_URL
     env = load_env(ENV_FILE)
     BOT_TOKEN = env["BOT_TOKEN"]
     ADMIN_TG_ID = int(env["ADMIN_TG_ID"])
@@ -2437,6 +2446,7 @@ def main():
     REQUIRED_MEMBERSHIP_MODE = config.required_membership_mode
     CUSTOMER_CONFIG = config
     SUPPORT_URL = config.support_url or load_legal_documents().get("support_url")
+    DONATION_URL = config.donation_url
     init_db()
     BillingRepository(DB_FILE).init_schema()
     ReferralRepository(DB_FILE).init_schema()

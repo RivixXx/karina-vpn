@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src import bot
-from src.ui.support import FAQS, faq_view, support_home_view
+from src.ui.support import FAQS, donation_view, faq_view, support_home_view
 
 
 def run(coroutine):
@@ -95,3 +95,32 @@ def test_support_resolver_failure_still_renders_text(monkeypatch):
     run(bot.render_support_home(update(), NS(user_data={})))
     assert compound.await_args.kwargs["sticker"] is None
     assert "ПОДДЕРЖКА" in compound.await_args.kwargs["text"]
+
+
+def test_donation_is_separate_from_subscription_and_safe_without_url():
+    text, keyboard = donation_view(None, "https://t.me/support")
+    assert "доброволь" in text.lower()
+    assert all(word in text.lower() for word in ("дни", "трафик", "доступ"))
+    assert "не начисляет" in text.lower()
+    assert callbacks(keyboard) == ["legal:refunds", "client_home"]
+    assert urls(keyboard) == ["https://t.me/support"]
+
+
+def test_configured_donation_url_is_only_external_payment_action():
+    _, keyboard = donation_view("https://donate.example.test/karina", None)
+    assert urls(keyboard) == ["https://donate.example.test/karina"]
+    assert callbacks(keyboard) == ["legal:refunds", "client_home"]
+
+
+def test_donation_callback_does_not_create_order(monkeypatch):
+    monkeypatch.setattr(bot, "DONATION_URL", None)
+    monkeypatch.setattr(bot, "SUPPORT_URL", "https://t.me/support")
+    monkeypatch.setattr(bot, "build_customer_order_service",
+                        lambda: (_ for _ in ()).throw(AssertionError("order created")))
+    display = AsyncMock()
+    monkeypatch.setattr(bot, "show_text", display)
+    upd = update()
+    upd.callback_query.answer = AsyncMock()
+    upd.callback_query.data = "client_donation"
+    run(bot.callbacks(upd, NS(user_data={})))
+    display.assert_awaited_once()

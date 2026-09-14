@@ -1,5 +1,6 @@
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qs, urlparse
 import pytest
 
 from src import bot
@@ -42,6 +43,12 @@ def test_referral_home_uses_index_14_real_stats_and_encoded_share(monkeypatch):
     assert "https://t.me/KarinaBot?start=ref_K7mP2x9Q" in kwargs["text"]
     share = kwargs["reply_markup"].inline_keyboard[0][0].url
     assert share.startswith("https://t.me/share/url?") and "%3Fstart%3Dref_K7mP2x9Q" in share
+    query = parse_qs(urlparse(share).query)
+    assert query["url"] == ["https://t.me/KarinaBot?start=ref_K7mP2x9Q"]
+    share_text = query["text"][0]
+    assert "Персональная ссылка-приглашение в Карина VPN" in share_text
+    assert "Попробуй" not in share_text
+    assert all(term not in share_text.lower() for term in ("обход", "блокиров", "аноним"))
 
 
 def test_referral_sticker_failure_keeps_text_screen(monkeypatch):
