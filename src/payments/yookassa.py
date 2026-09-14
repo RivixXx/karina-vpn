@@ -57,6 +57,14 @@ class YooKassaClient:
             raise YooKassaError("Invalid payment id")
         return self.transport("GET", f"{self.api_base}/payments/{payment_id}", self.headers)
 
+    def cancel_payment(self, payment_id, idempotence_key):
+        if not payment_id or "/" in payment_id:
+            raise YooKassaError("Invalid payment id")
+        headers = {**self.headers, "Content-Type": "application/json",
+                   "Idempotence-Key": idempotence_key}
+        return self.transport("POST", f"{self.api_base}/payments/{payment_id}/cancel",
+                              headers, b"{}")
+
 
 class YooKassaPaymentService:
     provider = "yookassa"
@@ -68,7 +76,7 @@ class YooKassaPaymentService:
         self.client = client
         self.return_url = return_url
 
-    def create_payment(self, order_id):
+    def create_payment(self, order_id, *, payment_method="sbp"):
         order = self.billing.get_order(order_id)
         if order is None or order.status is not OrderStatus.PENDING:
             raise YooKassaError("Order is not awaiting payment")
@@ -77,8 +85,14 @@ class YooKassaPaymentService:
             current = self.client.get_payment(session["payment_id"])
             current_status = current.get("status")
             if current_status in {"pending", "waiting_for_capture"}:
-                self.billing.repository.set_payment_session_status(session["payment_id"], current_status)
-                return PaymentLink(session["payment_id"], session["confirmation_url"])
+                current_method = (current.get("payment_method") or {}).get("type")
+                if current_method and current_method != payment_method:
+                    self.client.cancel_payment(session["payment_id"], f"cancel-{session['payment_id']}")
+                    self.billing.repository.set_payment_session_status(session["payment_id"], "canceled")
+                    current_status = "canceled"
+                else:
+                    self.billing.repository.set_payment_session_status(session["payment_id"], current_status)
+                    return PaymentLink(session["payment_id"], session["confirmation_url"])
             self.billing.repository.set_payment_session_status(session["payment_id"],
                                                                current_status or "unknown")
             if current_status == "succeeded":
@@ -90,6 +104,7 @@ class YooKassaPaymentService:
         payload = {
             "amount": {"value": f"{order.amount_rub:.2f}", "currency": "RUB"},
             "capture": True,
+            "payment_method_data": {"type": payment_method},
             "confirmation": {"type": "redirect", "return_url": self.return_url},
             "description": f"Karina VPN, заказ {order.id}",
             "metadata": {"order_id": order.id},
@@ -106,6 +121,22 @@ class YooKassaPaymentService:
             order.id, self.provider, payment_id, confirmation_url, attempt,
         )
         return PaymentLink(saved["payment_id"], saved["confirmation_url"])
+
+    def cancel_payment(self, order_id):
+        session = self.billing.repository.get_payment_session(order_id)
+        if not session or session["status"] not in {"pending", "waiting_for_capture"}:
+            return False
+        current = self.client.get_payment(session["payment_id"])
+        if current.get("status") == "canceled":
+            self.billing.repository.set_payment_session_status(session["payment_id"], "canceled")
+            return False
+        if current.get("status") not in {"pending", "waiting_for_capture"}:
+            raise YooKassaError("Payment can no longer be canceled")
+        canceled = self.client.cancel_payment(session["payment_id"], f"cancel-{session['payment_id']}")
+        if canceled.get("status") != "canceled":
+            raise YooKassaError("YooKassa did not cancel payment")
+        self.billing.repository.set_payment_session_status(session["payment_id"], "canceled")
+        return True
 
     def handle_webhook(self, event):
         try:

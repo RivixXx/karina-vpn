@@ -12,7 +12,7 @@ from src.services import BillingService, CustomerOrderError, CustomerOrderServic
 from src.ui.connection import connection_view
 from src.ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view
 from src.ui.help import platform_choice_view, platform_view
-from src.ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+from src.ui.tariffs import STAR_PRICES, get_tariff, tariff_detail_view, tariff_list_view
 from src import bot
 
 
@@ -57,10 +57,14 @@ def test_canonical_tariff_catalog_and_server_side_callbacks():
     ("m6", "150 ₽ в месяц", "295 ₽"), ("y1", "125 ₽ в месяц", "889 ₽"),
 ])
 def test_tariff_marketing_is_derived(code, monthly, saving):
-    text, keyboard = tariff_detail_view(code)
+    text, keyboard = tariff_detail_view(
+        code, order_id="KV-ORDER", sbp_url="https://yoomoney.ru/sbp",
+    )
     assert monthly in text
     assert (saving in text) if saving else "Экономия" not in text
-    assert callbacks(keyboard)[0] == f"order:{code}"
+    assert callbacks(keyboard)[0] == "stars:KV-ORDER"
+    assert keyboard.inline_keyboard[0][0].url == "https://yoomoney.ru/sbp"
+    assert f"{STAR_PRICES[code]:,} ⭐".replace(",", " ") in text
 
 
 def test_connection_and_platform_navigation_hide_missing_optional_urls():

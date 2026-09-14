@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     Update,
 )
 from telegram.constants import ChatType, ParseMode
@@ -21,6 +22,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    PreCheckoutQueryHandler,
     filters,
 )
 
@@ -39,7 +41,7 @@ try:
     from .ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
-    from .ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from .ui.tariffs import STAR_PRICES, get_tariff, tariff_detail_view, tariff_list_view
     from .ui.support import FAQS, donation_view, faq_view, support_home_view
     from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
@@ -62,7 +64,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.customer import cabinet_keyboard, format_cabinet, stale_binding_view, support_view
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
-    from ui.tariffs import get_tariff, tariff_detail_view, tariff_list_view
+    from ui.tariffs import STAR_PRICES, get_tariff, tariff_detail_view, tariff_list_view
     from ui.support import FAQS, donation_view, faq_view, support_home_view
     from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
@@ -1832,8 +1834,7 @@ async def render_tariffs(update, back_callback=None, context=None):
     repository.init_schema()
     pending = repository.get_pending_for_user(update.effective_user.id)
     if pending:
-        text, keyboard = pending_request_view(pending, get_tariff(pending.plan_id), back_callback="client_home")
-        await show_text(update, context, text, reply_markup=keyboard)
+        await render_checkout(update, context, pending)
         return
     limit = getattr(CUSTOMER_CONFIG, "default_hwid_limit", None)
     link = get_link_by_tg(update.effective_user.id)
@@ -1854,6 +1855,93 @@ async def render_tariffs(update, back_callback=None, context=None):
         await update.callback_query.edit_message_text(text, reply_markup=keyboard)
     else:
         await update.message.reply_text(text, reply_markup=keyboard)
+
+
+async def render_checkout(update, context, order):
+    plan = get_tariff(order.plan_id)
+    if plan is None:
+        raise CustomerOrderError("Тариф недоступен")
+    sbp_url = None
+    try:
+        payment = await asyncio.to_thread(
+            build_yookassa_payment_service().create_payment, order.id,
+            payment_method="sbp",
+        )
+        sbp_url = payment.confirmation_url
+    except (ConfigError, BillingError, YooKassaError, sqlite3.Error):
+        LOGGER.warning("SBP checkout is unavailable", exc_info=True)
+    text, keyboard = tariff_detail_view(
+        order.plan_id, back_callback="tariffs", order_id=order.id, sbp_url=sbp_url,
+    )
+    await show_text(update, context, text, reply_markup=keyboard)
+
+
+def stars_payload(order):
+    return f"karina:{order.id}:{order.tg_id}"
+
+
+async def precheckout(update, context):
+    query = update.pre_checkout_query
+    try:
+        prefix, order_id, tg_id = query.invoice_payload.split(":", 2)
+        orders = build_customer_order_service()
+        order = orders.get_request(query.from_user.id, order_id)
+        valid = (
+            prefix == "karina" and int(tg_id) == query.from_user.id
+            and order.status is OrderStatus.PENDING
+            and query.currency == "XTR"
+            and query.total_amount == STAR_PRICES[order.plan_id]
+        )
+    except (ValueError, KeyError, CustomerOrderError, BillingError, sqlite3.Error):
+        valid = False
+    if valid:
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Счёт устарел. Вернитесь в бот и выберите тариф заново.")
+
+
+async def successful_stars_payment(update, context):
+    payment = update.message.successful_payment
+    user = update.effective_user
+    try:
+        prefix, order_id, tg_id = payment.invoice_payload.split(":", 2)
+        if prefix != "karina" or int(tg_id) != user.id:
+            raise CustomerOrderError("Некорректный получатель платежа")
+        orders = build_customer_order_service()
+        order = orders.get_request(user.id, order_id)
+        expected = STAR_PRICES[order.plan_id]
+        if payment.currency != "XTR" or payment.total_amount != expected:
+            raise CustomerOrderError("Сумма платежа не совпадает с тарифом")
+        charge_id = payment.telegram_payment_charge_id
+        if not charge_id:
+            raise CustomerOrderError("Платёж не содержит идентификатор Telegram")
+        if order.status is OrderStatus.PENDING:
+            try:
+                orders.billing.mark_paid(order.id, "telegram_stars", charge_id)
+            except BillingError:
+                order = orders.get_request(user.id, order_id)
+                if not (order.status in {OrderStatus.PAID, OrderStatus.COMPLETED}
+                        and order.provider == "telegram_stars"
+                        and order.provider_payment_id == charge_id):
+                    raise
+        elif not (order.status in {OrderStatus.PAID, OrderStatus.COMPLETED}
+                  and order.provider == "telegram_stars"
+                  and order.provider_payment_id == charge_id):
+            raise CustomerOrderError("Заявка уже закрыта")
+        completed, _ = orders.approve(order.id)
+        await update.message.reply_text(
+            "✅ Оплата звёздами получена. Карина активировала подписку.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏠 Открыть кабинет", callback_data="client_home")
+            ]]),
+        )
+        await deliver_payment_effects(context)
+        return completed
+    except (CustomerOrderError, BillingError, ClientServiceError, sqlite3.Error):
+        LOGGER.exception("Telegram Stars payment requires recovery")
+        await update.message.reply_text(
+            "Оплата получена, но активация задержалась. Повторно платить не нужно — Карина уже разбирается."
+        )
 
 
 def welcome_view():
@@ -2026,12 +2114,7 @@ async def callbacks(
                 await show_text(update, context, labels[order.status], reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")]]))
                 return
-            link = await asyncio.to_thread(build_yookassa_payment_service().create_payment, order_id)
-            await show_text(update, context, "Перейдите на защищённую страницу ЮKassa для оплаты.",
-                            reply_markup=InlineKeyboardMarkup([
-                                [InlineKeyboardButton("💳 Оплатить", url=link.confirmation_url)],
-                                [InlineKeyboardButton("🔄 Проверить статус", callback_data=f"order_status:{order_id}")],
-                            ]))
+            await render_checkout(update, context, order)
         except (CustomerOrderError, BillingError, YooKassaError, sqlite3.Error):
             await query.answer("Платёж временно недоступен", show_alert=True)
         return
@@ -2069,7 +2152,8 @@ async def callbacks(
                 await render_tariffs(update, context=context)
                 return
             if data.startswith("order_status:"):
-                text, keyboard = pending_request_view(order, get_tariff(order.plan_id), back_callback="client_home")
+                await render_checkout(update, context, order)
+                return
             else:
                 changing = data.startswith("order_change:")
                 text = ("🔁 ИЗМЕНИТЬ ТАРИФ?\n\nТекущая заявка будет отменена. После отмены оплата по ней не активирует подписку."
@@ -2146,6 +2230,37 @@ async def callbacks(
         except (CustomerOrderError, BillingError, ClientServiceError, sqlite3.Error) as exc:
             LOGGER.warning("Order moderation failed", exc_info=True)
             await query.edit_message_text(f"⚠️ {safe_user_error(exc, admin=True)}")
+        return
+
+    if re.fullmatch(r"stars:[A-Za-z0-9_-]+", data):
+        order_id = data.split(":", 1)[1]
+        try:
+            orders = build_customer_order_service()
+            order = orders.get_request(update.effective_user.id, order_id)
+            if order.status is not OrderStatus.PENDING:
+                raise CustomerOrderError("Заявка уже закрыта")
+            plan = get_tariff(order.plan_id)
+            if plan is None:
+                raise CustomerOrderError("Тариф недоступен")
+            try:
+                await asyncio.to_thread(build_yookassa_payment_service().cancel_payment, order.id)
+            except YooKassaError:
+                LOGGER.warning("Could not cancel SBP checkout before Stars invoice", exc_info=True)
+                await query.answer("Не удалось переключить способ оплаты. Попробуйте ещё раз.", show_alert=True)
+                return
+            await context.bot.send_invoice(
+                chat_id=update.effective_chat.id,
+                title=f"Карина VPN · {plan.title}",
+                description=f"Доступ к сервису на {plan.days} дней",
+                payload=stars_payload(order),
+                provider_token="",
+                currency="XTR",
+                prices=[LabeledPrice(plan.title, STAR_PRICES[plan.id])],
+                start_parameter=f"karina-{plan.id}",
+            )
+            await query.answer()
+        except (CustomerOrderError, BillingError, sqlite3.Error):
+            await query.answer("Счёт недоступен. Выберите тариф заново.", show_alert=True)
         return
     if data == "admin_create_help" or data.startswith("ac:"):
         if is_admin(update):
@@ -2256,13 +2371,12 @@ async def callbacks(
         else:
             code = data.split(":", 1)[1]
             try:
-                text, keyboard = tariff_detail_view(
-                    code, back_callback="tariffs",
-                )
-            except ValueError:
+                user = update.effective_user
+                orders = build_customer_order_service()
+                order, _ = orders.create_request(user.id, code)
+                await render_checkout(update, context, order)
+            except (ValueError, CustomerOrderError, BillingError, sqlite3.Error):
                 await query.answer("Тариф недоступен", show_alert=True)
-                return
-            await show_text(update, context, text, reply_markup=keyboard)
         return
 
     if re.fullmatch(r"order:[a-z0-9]+", data):
@@ -2302,10 +2416,7 @@ async def callbacks(
             LOGGER.warning("Order creation failed", exc_info=True)
             await query.answer("Не удалось создать заявку", show_alert=True)
             return
-        text, keyboard = pending_request_view(
-            order, plan, back_callback="client_home",
-        )
-        await show_text(update, context, text, reply_markup=keyboard)
+        await render_checkout(update, context, order)
         return
 
     # CLIENT
@@ -2579,6 +2690,9 @@ def main():
             admin_create_text,
         )
     )
+
+    app.add_handler(PreCheckoutQueryHandler(precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_stars_payment))
 
     app.add_handler(
         CallbackQueryHandler(

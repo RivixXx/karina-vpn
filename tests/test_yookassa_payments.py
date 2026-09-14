@@ -49,6 +49,7 @@ def test_create_payment_is_idempotent_and_persists_reference(payment_setup):
     assert repo.get_order(order.id).provider_payment_id == "pay_1"
     request = json.loads(transport.calls[0][3].decode())
     assert request["capture"] is True and request["metadata"]["order_id"] == order.id
+    assert request["payment_method_data"] == {"type": "sbp"}
     assert transport.calls[0][2]["Idempotence-Key"] == "karina-KV-ORDER-1"
 
 
@@ -76,6 +77,23 @@ def test_only_explicitly_canceled_payment_is_replaced(payment_setup):
                                      "https://vpn.example.test/payment-return")
     assert service.create_payment(order.id).payment_id == "pay_new"
     assert transport.calls[1][2]["Idempotence-Key"] == "karina-KV-ORDER-2"
+
+
+def test_switching_to_stars_cancels_active_yookassa_payment(payment_setup):
+    repo, billing, order = payment_setup
+    repo.save_payment_session(order.id, "yookassa", "pay_sbp", "https://yoomoney.ru/pay/sbp", 1)
+    transport = FakeTransport([
+        {"id": "pay_sbp", "status": "pending"},
+        {"id": "pay_sbp", "status": "canceled"},
+    ])
+    service = YooKassaPaymentService(
+        billing, YooKassaClient("shop", "secret", transport=transport),
+        "https://vpn.example.test/payment-return",
+    )
+    assert service.cancel_payment(order.id) is True
+    assert repo.get_payment_session(order.id)["status"] == "canceled"
+    assert transport.calls[1][0] == "POST"
+    assert transport.calls[1][1].endswith("/payments/pay_sbp/cancel")
 
 
 def test_concurrent_creation_uses_one_provider_idempotence_key(payment_setup):

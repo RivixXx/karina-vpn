@@ -3,6 +3,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from ..models import PLANS
 
 
+STAR_PRICES = {"m1": 100, "m3": 250, "m6": 500, "y1": 1000}
+
+
 def get_tariff(code):
     return next((plan for plan in PLANS if plan.id == code and plan.enabled), None)
 
@@ -35,7 +38,7 @@ def saving_percent(plan):
     return max(0, (base - plan.price_rub) * 100 / base)
 
 
-def tariff_detail_view(code, *, back_callback="tariffs"):
+def tariff_detail_view(code, *, back_callback="tariffs", order_id=None, sbp_url=None):
     plan = get_tariff(code)
     if plan is None:
         raise ValueError("unknown tariff")
@@ -43,16 +46,30 @@ def tariff_detail_view(code, *, back_callback="tariffs"):
     monthly = round(plan.price_rub / months)
     saving = max(0, get_tariff("m1").price_rub * months - plan.price_rub)
     icon = {"m1": "💖", "m3": "⭐", "m6": "🔥", "y1": "👑"}.get(code, "💖")
-    text = ("💳 ОФОРМЛЕНИЕ ПОДПИСКИ • Карина VPN\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    stars = STAR_PRICES[code]
+    text = ("💳 ВЫБЕРИТЕ СПОСОБ ОПЛАТЫ • Карина VPN\n━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{icon} Тариф «{plan.title}»\n\nСрок: {plan.days} дней\n"
-            f"Стоимость: {plan.price_rub:,} ₽\n≈ {monthly} ₽ в месяц".replace(",", " "))
+            f"По СБП: {plan.price_rub:,} ₽\nЗвёздами: {stars:,} ⭐\n≈ {monthly} ₽ в месяц".replace(",", " "))
     if saving:
         text += f"\n\nЭкономия: {saving} ₽\nпо сравнению с помесячной оплатой."
     text += "\n\nПосле успешной оплаты Карина сама активирует или продлит подписку."
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("💳 Перейти к оплате", callback_data=f"order:{plan.id}")],
+    payment_rows = []
+    if sbp_url:
+        payment_rows.append([InlineKeyboardButton("🟢 Оплатить по СБП", url=sbp_url)])
+    else:
+        payment_rows.append([InlineKeyboardButton(
+            "🔄 Повторить подготовку СБП",
+            callback_data=f"order_status:{order_id}" if order_id else f"checkout:{plan.id}",
+        )])
+    payment_rows.append([InlineKeyboardButton(
+        f"⭐ Оплатить звёздами · {stars}",
+        callback_data=f"stars:{order_id}" if order_id else f"checkout_stars:{plan.id}",
+    )])
+    keyboard = InlineKeyboardMarkup(payment_rows + [
         [InlineKeyboardButton("📄 Условия и возвраты", callback_data="legal:home")],
-        [InlineKeyboardButton("← Другой тариф", callback_data=back_callback)],
+        [InlineKeyboardButton("← Другой тариф", callback_data=(
+            f"order_change:{order_id}" if order_id else back_callback
+        ))],
         [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")],
     ])
     return text, keyboard
