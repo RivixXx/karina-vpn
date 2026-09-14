@@ -4,8 +4,10 @@ import logging
 
 try:
     from .avatar_scheduler import AvatarApplication
+    from .bot_menu import configure_menu
 except ImportError:
     from avatar_scheduler import AvatarApplication
+    from bot_menu import configure_menu
 
 LOGGER = logging.getLogger(__name__)
 TASK_KEY = "payment_effects_task"
@@ -33,6 +35,7 @@ async def stop_delivery(application):
 class ServiceApplication(AvatarApplication):
     async def start(self):
         await super().start()
+        await configure_menu(self.bot)
         self.bot_data[TASK_KEY] = self.create_task(delivery_loop(self), name="karina-payment-effects")
 
     async def stop(self):

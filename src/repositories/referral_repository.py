@@ -163,7 +163,7 @@ class ReferralRepository:
         with closing(self._connect()) as db:
             return db.execute("""
                 SELECT COUNT(*) invited,
-                  SUM(CASE WHEN qualified_at IS NOT NULL THEN 1 ELSE 0 END) qualified,
+                  COALESCE(SUM(CASE WHEN qualified_at IS NOT NULL THEN 1 ELSE 0 END), 0) qualified,
                   COALESCE((SELECT SUM(amount) FROM referral_rewards
                     WHERE recipient_tg_id=? AND reward_type='subscription_days'
                       AND applied_at IS NOT NULL), 0) earned_days
