@@ -1873,7 +1873,11 @@ async def render_checkout(update, context, order):
     text, keyboard = tariff_detail_view(
         order.plan_id, back_callback="tariffs", order_id=order.id, sbp_url=sbp_url,
     )
-    await show_text(update, context, text, reply_markup=keyboard)
+    sticker = await resolve_sticker(context, 10)
+    await show_compound(
+        update, context, screen_key="payment_checkout", sticker=sticker,
+        text=text, reply_markup=keyboard,
+    )
 
 
 def stars_payload(order):

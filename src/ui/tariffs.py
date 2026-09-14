@@ -65,11 +65,12 @@ def tariff_detail_view(code, *, back_callback="tariffs", order_id=None, sbp_url=
         f"⭐ Оплатить звёздами · {stars}",
         callback_data=f"stars:{order_id}" if order_id else f"checkout_stars:{plan.id}",
     )])
-    keyboard = InlineKeyboardMarkup(payment_rows + [
-        [InlineKeyboardButton("📄 Условия и возвраты", callback_data="legal:home")],
-        [InlineKeyboardButton("← Другой тариф", callback_data=(
+    keyboard = InlineKeyboardMarkup(payment_rows + [[
+        InlineKeyboardButton("📄 Условия и возвраты", callback_data="legal:home"),
+        InlineKeyboardButton("← Другой тариф", callback_data=(
             f"order_change:{order_id}" if order_id else back_callback
-        ))],
+        )),
+    ],
         [InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")],
     ])
     return text, keyboard

@@ -65,6 +65,8 @@ def test_tariff_marketing_is_derived(code, monthly, saving):
     assert callbacks(keyboard)[0] == "stars:KV-ORDER"
     assert keyboard.inline_keyboard[0][0].url == "https://yoomoney.ru/sbp"
     assert f"{STAR_PRICES[code]:,} ⭐".replace(",", " ") in text
+    assert len(keyboard.inline_keyboard[2]) == 2
+    assert callbacks(keyboard)[1:3] == ["legal:home", "order_change:KV-ORDER"]
 
 
 def test_connection_and_platform_navigation_hide_missing_optional_urls():
