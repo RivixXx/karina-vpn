@@ -1,0 +1,38 @@
+[Unit]
+Description=Karina VPN Telegram bot (hardened)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=karina-bot
+Group=karina-bot
+WorkingDirectory=/opt/karina-vpn
+EnvironmentFile=/etc/karina-vpn/config.env
+ExecStart=/opt/karina-vpn/.venv/bin/python -m src.bot
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+ReadOnlyPaths=/etc/karina-vpn
+ReadWritePaths=/opt/karina-bot
+
+[Install]
+WantedBy=multi-user.target
