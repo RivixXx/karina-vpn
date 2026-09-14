@@ -28,7 +28,7 @@ def urls(markup):
 
 
 def update():
-    return NS(effective_chat=NS(id=2), effective_user=NS(id=2),
+    return NS(effective_chat=NS(id=2, type="private"), effective_user=NS(id=2),
               callback_query=NS(message=NS(message_id=1), edit_message_text=AsyncMock()))
 
 
