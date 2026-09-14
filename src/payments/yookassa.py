@@ -86,8 +86,12 @@ class YooKassaPaymentService:
             current_status = current.get("status")
             if current_status in {"pending", "waiting_for_capture"}:
                 current_method = (current.get("payment_method") or {}).get("type")
-                if current_method and current_method != payment_method:
-                    self.client.cancel_payment(session["payment_id"], f"cancel-{session['payment_id']}")
+                if current_method != payment_method:
+                    canceled = self.client.cancel_payment(
+                        session["payment_id"], f"cancel-{session['payment_id']}",
+                    )
+                    if canceled.get("status") != "canceled":
+                        raise YooKassaError("YooKassa did not cancel incompatible payment")
                     self.billing.repository.set_payment_session_status(session["payment_id"], "canceled")
                     current_status = "canceled"
                 else:

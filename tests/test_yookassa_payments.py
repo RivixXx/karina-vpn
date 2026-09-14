@@ -39,7 +39,9 @@ def test_create_payment_is_idempotent_and_persists_reference(payment_setup):
         "id": "pay_1", "status": "pending",
         "confirmation": {"type": "redirect", "confirmation_url": "https://yoomoney.ru/pay/1"},
     }
-    transport = FakeTransport([created, {"id": "pay_1", "status": "pending"}])
+    transport = FakeTransport([created, {
+        "id": "pay_1", "status": "pending", "payment_method": {"type": "sbp"},
+    }])
     client = YooKassaClient("shop", "secret", transport=transport)
     service = YooKassaPaymentService(billing, client, "https://vpn.example.test/payment-return")
     first = service.create_payment(order.id)
@@ -58,7 +60,10 @@ def test_every_active_payment_state_reuses_existing_link(payment_setup, active_s
     repo, billing, order = payment_setup
     repo.save_payment_session(order.id, "yookassa", "pay_active", "https://yoomoney.ru/pay/active", 1)
     repo.set_payment_session_status("pay_active", active_status)
-    transport = FakeTransport([{"id": "pay_active", "status": active_status}])
+    transport = FakeTransport([{
+        "id": "pay_active", "status": active_status,
+        "payment_method": {"type": "sbp"},
+    }])
     service = YooKassaPaymentService(billing, YooKassaClient("shop", "secret", transport=transport),
                                      "https://vpn.example.test/payment-return")
     assert service.create_payment(order.id).payment_id == "pay_active"
@@ -77,6 +82,25 @@ def test_only_explicitly_canceled_payment_is_replaced(payment_setup):
                                      "https://vpn.example.test/payment-return")
     assert service.create_payment(order.id).payment_id == "pay_new"
     assert transport.calls[1][2]["Idempotence-Key"] == "karina-KV-ORDER-2"
+
+
+def test_legacy_smart_payment_is_replaced_with_direct_sbp(payment_setup):
+    repo, billing, order = payment_setup
+    repo.save_payment_session(order.id, "yookassa", "pay_smart", "https://yoomoney.ru/contract", 1)
+    transport = FakeTransport([
+        {"id": "pay_smart", "status": "pending"},
+        {"id": "pay_smart", "status": "canceled"},
+        {"id": "pay_sbp", "status": "pending", "payment_method": {"type": "sbp"},
+         "confirmation": {"confirmation_url": "https://yoomoney.ru/checkout/payments/sbp?orderId=pay_sbp"}},
+    ])
+    service = YooKassaPaymentService(
+        billing, YooKassaClient("shop", "secret", transport=transport),
+        "https://vpn.example.test/payment-return",
+    )
+    link = service.create_payment(order.id)
+    assert "/payments/sbp?" in link.confirmation_url
+    assert [call[0] for call in transport.calls] == ["GET", "POST", "POST"]
+    assert transport.calls[1][1].endswith("/payments/pay_smart/cancel")
 
 
 def test_switching_to_stars_cancels_active_yookassa_payment(payment_setup):
