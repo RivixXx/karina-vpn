@@ -20,15 +20,19 @@ def tariff_list_view(*, support_url=None, back_callback=None, device_limit=None)
         "💡 Чем больше срок — тем выгоднее подписка."
     )
     icons = {"m1": "", "m3": "⭐ ", "m6": "🔥 ", "y1": "👑 "}
-    rows = [[InlineKeyboardButton(
-        (f"{icons.get(plan.id, '')}{plan.title} — {plan.price_rub:,} ₽"
+    tariff_buttons = [InlineKeyboardButton(
+        (f"{icons.get(plan.id, '')}{plan.title} · {plan.price_rub:,} ₽"
          + (f" · −{round(saving_percent(plan))}%" if saving_percent(plan) else "")).replace(",", " "),
         callback_data=f"tariff:{plan.id}",
-    )] for plan in PLANS if plan.enabled]
+    ) for plan in PLANS if plan.enabled]
+    rows = [tariff_buttons[index:index + 2] for index in range(0, len(tariff_buttons), 2)]
+    navigation = []
     if support_url:
-        rows.append([InlineKeyboardButton("💬 Поддержка", callback_data="client_support")])
+        navigation.append(InlineKeyboardButton("💬 Поддержка", callback_data="client_support"))
     if back_callback:
-        rows.append([InlineKeyboardButton("← Назад", callback_data=back_callback)])
+        navigation.append(InlineKeyboardButton("← Назад", callback_data=back_callback))
+    if navigation:
+        rows.append(navigation)
     return text, InlineKeyboardMarkup(rows)
 
 

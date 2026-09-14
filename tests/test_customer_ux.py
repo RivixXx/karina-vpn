@@ -48,8 +48,17 @@ def test_canonical_tariff_catalog_and_server_side_callbacks():
     text, keyboard = tariff_list_view()
     assert " tranche" not in text
     assert callbacks(keyboard) == ["tariff:m1", "tariff:m3", "tariff:m6", "tariff:y1"]
+    assert [len(row) for row in keyboard.inline_keyboard] == [2, 2]
     assert get_tariff("m6").price_rub == 899
     assert get_tariff("unknown") is None
+
+
+def test_tariff_keyboard_has_two_by_two_prices_and_one_navigation_row():
+    _, keyboard = tariff_list_view(
+        support_url="https://example.test/support", back_callback="client_home",
+    )
+    assert [len(row) for row in keyboard.inline_keyboard] == [2, 2, 2]
+    assert callbacks(keyboard)[-2:] == ["client_support", "client_home"]
 
 
 @pytest.mark.parametrize("code,monthly,saving", [
