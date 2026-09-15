@@ -41,6 +41,29 @@ def test_precheckout_rejects_wrong_stars_amount(monkeypatch):
     assert query.answer.await_args.kwargs["ok"] is False
 
 
+def test_donation_precheckout_accepts_fixed_amount_without_subscription(monkeypatch):
+    monkeypatch.setattr(
+        bot, "build_customer_order_service",
+        lambda: (_ for _ in ()).throw(AssertionError("subscription order accessed")),
+    )
+    query = NS(invoice_payload="karina-donation:100:42", from_user=NS(id=42),
+               currency="XTR", total_amount=100, answer=AsyncMock())
+    run(bot.precheckout(NS(pre_checkout_query=query), NS()))
+    query.answer.assert_awaited_once_with(ok=True)
+
+
+def test_successful_donation_does_not_provision_subscription(monkeypatch):
+    monkeypatch.setattr(
+        bot, "build_customer_order_service",
+        lambda: (_ for _ in ()).throw(AssertionError("subscription order accessed")),
+    )
+    payment = NS(invoice_payload="karina-donation:250:42", currency="XTR",
+                 total_amount=250, telegram_payment_charge_id="donation-charge-1")
+    message = NS(successful_payment=payment, reply_text=AsyncMock())
+    run(bot.successful_stars_payment(NS(message=message, effective_user=NS(id=42)), NS()))
+    assert "Спасибо" in message.reply_text.await_args.args[0]
+
+
 def test_successful_stars_payment_marks_paid_and_provisions(monkeypatch):
     order = NS(
         id="KV-ONE", tg_id=42, plan_id="m1", status=OrderStatus.PENDING,

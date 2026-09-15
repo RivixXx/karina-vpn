@@ -102,14 +102,18 @@ def test_donation_is_separate_from_subscription_and_safe_without_url():
     assert "доброволь" in text.lower()
     assert all(word in text.lower() for word in ("дни", "трафик", "доступ"))
     assert "не начисляет" in text.lower()
-    assert callbacks(keyboard) == ["legal:refunds", "client_home"]
-    assert urls(keyboard) == ["https://t.me/support"]
+    assert callbacks(keyboard) == ["donation_stars:50", "donation_stars:100",
+                                   "donation_stars:250", "donation_stars:500",
+                                   "legal:refunds", "client_home"]
+    assert urls(keyboard) == []
 
 
 def test_configured_donation_url_is_only_external_payment_action():
     _, keyboard = donation_view("https://donate.example.test/karina", None)
     assert urls(keyboard) == ["https://donate.example.test/karina"]
-    assert callbacks(keyboard) == ["legal:refunds", "client_home"]
+    assert callbacks(keyboard) == ["donation_stars:50", "donation_stars:100",
+                                   "donation_stars:250", "donation_stars:500",
+                                   "legal:refunds", "client_home"]
 
 
 def test_donation_callback_does_not_create_order(monkeypatch):

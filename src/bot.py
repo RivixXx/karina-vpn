@@ -42,7 +42,7 @@ try:
     from .ui.connection import connection_view
     from .ui.help import platform_choice_view, platform_view
     from .ui.tariffs import STAR_PRICES, get_tariff, tariff_detail_view, tariff_list_view
-    from .ui.support import FAQS, donation_view, faq_view, support_home_view
+    from .ui.support import DONATION_STAR_AMOUNTS, FAQS, donation_view, faq_view, support_home_view
     from .telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from .avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from .payment_worker import ServiceApplication
@@ -65,7 +65,7 @@ except ImportError:  # Direct execution from the src directory.
     from ui.connection import connection_view
     from ui.help import platform_choice_view, platform_view
     from ui.tariffs import STAR_PRICES, get_tariff, tariff_detail_view, tariff_list_view
-    from ui.support import FAQS, donation_view, faq_view, support_home_view
+    from ui.support import DONATION_STAR_AMOUNTS, FAQS, donation_view, faq_view, support_home_view
     from telegram_navigation import current_screen, show_compound, show_photo, show_text, show_video
     from avatar_scheduler import AvatarApplication, TIMEZONE as MOSCOW_TIMEZONE
     from payment_worker import ServiceApplication
@@ -1900,6 +1900,19 @@ async def precheckout(update, context):
     query = update.pre_checkout_query
     try:
         prefix, order_id, tg_id = query.invoice_payload.split(":", 2)
+        if prefix == "karina-donation":
+            amount = int(order_id)
+            valid = (
+                int(tg_id) == query.from_user.id
+                and query.currency == "XTR"
+                and query.total_amount == amount
+                and amount in DONATION_STAR_AMOUNTS
+            )
+            await query.answer(
+                ok=valid,
+                **({} if valid else {"error_message": "Счёт поддержки устарел. Вернитесь в бот."}),
+            )
+            return
         orders = build_customer_order_service()
         order = orders.get_request(query.from_user.id, order_id)
         valid = (
@@ -1921,6 +1934,19 @@ async def successful_stars_payment(update, context):
     user = update.effective_user
     try:
         prefix, order_id, tg_id = payment.invoice_payload.split(":", 2)
+        if prefix == "karina-donation":
+            amount = int(order_id)
+            if (int(tg_id) != user.id or payment.currency != "XTR"
+                    or payment.total_amount != amount or amount not in DONATION_STAR_AMOUNTS
+                    or not payment.telegram_payment_charge_id):
+                raise CustomerOrderError("Некорректный платёж поддержки")
+            await update.message.reply_text(
+                "💝 Спасибо за поддержку проекта! Она не изменяет срок подписки.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🏠 В главное меню", callback_data="client_home")
+                ]]),
+            )
+            return
         if prefix != "karina" or int(tg_id) != user.id:
             raise CustomerOrderError("Некорректный получатель платежа")
         orders = build_customer_order_service()
@@ -2258,12 +2284,6 @@ async def callbacks(
             plan = get_tariff(order.plan_id)
             if plan is None:
                 raise CustomerOrderError("Тариф недоступен")
-            try:
-                await asyncio.to_thread(build_yookassa_payment_service().cancel_payment, order.id)
-            except YooKassaError:
-                LOGGER.warning("Could not cancel SBP checkout before Stars invoice", exc_info=True)
-                await query.answer("Не удалось переключить способ оплаты. Попробуйте ещё раз.", show_alert=True)
-                return
             await context.bot.send_invoice(
                 chat_id=update.effective_chat.id,
                 title=f"Карина VPN · {plan.title}",
@@ -2277,6 +2297,20 @@ async def callbacks(
             await query.answer()
         except (CustomerOrderError, BillingError, sqlite3.Error):
             await query.answer("Счёт недоступен. Выберите тариф заново.", show_alert=True)
+        return
+    if re.fullmatch(r"donation_stars:(?:50|100|250|500)", data):
+        amount = int(data.split(":", 1)[1])
+        await context.bot.send_invoice(
+            chat_id=update.effective_chat.id,
+            title="Поддержать Карину",
+            description="Добровольная поддержка разработки и обслуживания проекта",
+            payload=f"karina-donation:{amount}:{update.effective_user.id}",
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice("Поддержка проекта", amount)],
+            start_parameter=f"karina-donation-{amount}",
+        )
+        await query.answer()
         return
     if data == "admin_create_help" or data.startswith("ac:"):
         if is_admin(update):

@@ -53,10 +53,8 @@ def cabinet_keyboard(*, news_url=None, support_url=None, donation_url=None):
          InlineKeyboardButton("📱 Мои устройства", callback_data="client_devices")],
         [InlineKeyboardButton("📖 Как подключить", callback_data="connect_help"),
          InlineKeyboardButton("👥 Пригласить друга", callback_data="client_referral")],
-        ([InlineKeyboardButton("💬 Поддержка", callback_data="client_support"),
-          InlineKeyboardButton("💝 Поддержать проект", callback_data="client_donation")]
-         if donation_url else
-         [InlineKeyboardButton("💬 Поддержка", callback_data="client_support")]),
+        [InlineKeyboardButton("💬 Поддержка", callback_data="client_support"),
+         InlineKeyboardButton("💝 Поддержать проект", callback_data="client_donation")],
         [InlineKeyboardButton("🔄 Обновить", callback_data="client_home")],
     ]
     return InlineKeyboardMarkup(rows)

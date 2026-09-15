@@ -95,6 +95,9 @@ def support_home_view(support_url=None, knowledge_base_url=None):
     return text, InlineKeyboardMarkup(rows)
 
 
+DONATION_STAR_AMOUNTS = (50, 100, 250, 500)
+
+
 def donation_view(donation_url=None, support_url=None):
     text = (
         "💝 ДОБРОВОЛЬНАЯ ПОДДЕРЖКА • Карина VPN\n"
@@ -103,14 +106,16 @@ def donation_view(donation_url=None, support_url=None):
         "Это не покупка и не продление подписки: поддержка не начисляет дни, "
         "трафик или доступ к VPN.\n\n"
     )
-    rows = []
+    rows = [
+        [InlineKeyboardButton(f"⭐ {amount}", callback_data=f"donation_stars:{amount}")
+         for amount in DONATION_STAR_AMOUNTS[:2]],
+        [InlineKeyboardButton(f"⭐ {amount}", callback_data=f"donation_stars:{amount}")
+         for amount in DONATION_STAR_AMOUNTS[2:]],
+    ]
+    text += "Выберите сумму поддержки в Telegram Stars."
     if donation_url:
-        text += "Размер поддержки вы выбираете на внешней странице."
+        text += " Также можно открыть внешнюю страницу."
         rows.append([InlineKeyboardButton("💝 Поддержать проект", url=donation_url)])
-    else:
-        text += "Способ поддержки пока не настроен. Заказ и платёж не создаются."
-        if support_url:
-            rows.append([InlineKeyboardButton("✍️ Задать вопрос оператору", url=support_url)])
     rows.extend([
         [InlineKeyboardButton("📄 Порядок возврата", callback_data="legal:refunds")],
         [InlineKeyboardButton("← Назад в меню", callback_data="client_home")],

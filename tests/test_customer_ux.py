@@ -151,11 +151,10 @@ def test_cabinet_branded_button_layout_uses_existing_callbacks():
                for row in keyboard.inline_keyboard for button in row)
     assert callbacks(keyboard) == [
         "client_connect", "tariffs", "client_devices", "connect_help",
-        "client_referral", "client_support", "client_home",
+        "client_referral", "client_support", "client_donation", "client_home",
     ]
 
-    with_donation = cabinet_keyboard(donation_url="https://example.test/support")
-    assert "client_donation" in callbacks(with_donation)
+    assert "client_donation" in callbacks(keyboard)
 
 
 def test_stale_binding_is_preserved_and_recoverable():

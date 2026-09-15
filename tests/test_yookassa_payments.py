@@ -103,7 +103,7 @@ def test_legacy_smart_payment_is_replaced_with_direct_sbp(payment_setup):
     assert transport.calls[1][1].endswith("/payments/pay_smart/cancel")
 
 
-def test_switching_to_stars_cancels_active_yookassa_payment(payment_setup):
+def test_explicit_cancel_cancels_active_yookassa_payment(payment_setup):
     repo, billing, order = payment_setup
     repo.save_payment_session(order.id, "yookassa", "pay_sbp", "https://yoomoney.ru/pay/sbp", 1)
     transport = FakeTransport([
