@@ -12,7 +12,10 @@ def operation_lock(connect):
     if not path:
         raise RuntimeError("Payment operations require a persistent database")
     lock_path = Path(path + ".operations.lock")
-    with lock_path.open("a+b") as stream:
+    descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o660)
+    if os.name != "nt":
+        os.fchmod(descriptor, 0o660)
+    with os.fdopen(descriptor, "r+b") as stream:
         if os.name == "nt":
             import msvcrt
             if stream.tell() == 0:

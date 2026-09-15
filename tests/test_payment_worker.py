@@ -16,12 +16,14 @@ def run(coroutine):
 
 
 def test_delivery_cycle_failure_is_isolated(monkeypatch):
+    recover = AsyncMock()
     deliver = AsyncMock(side_effect=RuntimeError("temporary"))
     sleep = AsyncMock(side_effect=asyncio.CancelledError())
     monkeypatch.setattr(payment_worker.asyncio, "sleep", sleep)
-    app = NS(bot_data={"deliver_payment_effects": deliver})
+    app = NS(bot_data={"recover_paid_payments": recover, "deliver_payment_effects": deliver})
     with pytest.raises(asyncio.CancelledError):
         run(payment_worker.delivery_loop(app))
+    recover.assert_awaited_once_with(app)
     deliver.assert_awaited_once_with(app)
     sleep.assert_awaited_once_with(30)
 

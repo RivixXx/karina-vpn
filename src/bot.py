@@ -898,6 +898,18 @@ async def deliver_payment_effects(context):
                          apply_referral_reward, ADMIN_TG_ID)
 
 
+async def recover_paid_payments(context):
+    repository = BillingRepository(DB_FILE)
+    orders = build_customer_order_service()
+    for order in repository.recovery_orders(limit=20):
+        if order.status is not OrderStatus.PAID:
+            continue
+        try:
+            await asyncio.to_thread(orders.approve, order.id)
+        except (CustomerOrderError, BillingError, ClientServiceError, sqlite3.Error):
+            LOGGER.warning("Paid order recovery failed order=%s", order.id, exc_info=True)
+
+
 async def payment_admin(update, context, order_id=None, page=0):
     if not is_private_chat(update) or not is_admin(update):
         return
@@ -2675,6 +2687,7 @@ def main():
     )
     app.bot_data["config"] = config
     app.bot_data["deliver_payment_effects"] = deliver_payment_effects
+    app.bot_data["recover_paid_payments"] = recover_paid_payments
     app.add_handler(CommandHandler("payments", payment_admin))
     app.add_handler(CommandHandler(
         ["terms", "refunds", "privacy", "support", "paysupport"], legal_command,

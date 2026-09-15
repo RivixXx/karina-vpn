@@ -735,6 +735,8 @@ def test_unlimited_bundle_extension_uses_now_as_base(config, tmp_path):
 
 def test_absolute_bundle_expiry_reconciles_both_without_mutating_credentials(config, tmp_path):
     clients = bundle_clients()
+    clients["demo"]["client"]["enable"] = False
+    clients["demo__mobile"]["client"]["enable"] = False
     before = deepcopy(clients)
     service, xui = make_service(config, tmp_path, clients)
     target = NOW + 45 * DAY
@@ -742,6 +744,8 @@ def test_absolute_bundle_expiry_reconciles_both_without_mutating_credentials(con
     assert xui.clients["demo"]["client"]["expiryTime"] == target
     assert xui.clients["demo__mobile"]["client"]["expiryTime"] == target
     assert xui.clients["demo__mobile"]["client"]["limitHwid"] == 0
+    assert xui.clients["demo"]["client"]["enable"] is True
+    assert xui.clients["demo__mobile"]["client"]["enable"] is True
     for email in ("demo", "demo__mobile"):
         assert xui.clients[email]["client"]["subId"] == before[email]["client"]["subId"]
         assert xui.clients[email]["client"]["totalGB"] == before[email]["client"]["totalGB"]

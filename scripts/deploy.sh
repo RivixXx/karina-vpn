@@ -18,6 +18,9 @@ fi
 [[ -f /opt/karina-bot/.env ]] || { echo "Missing legacy bot config /opt/karina-bot/.env" >&2; exit 1; }
 [[ -f /opt/karina-bot/karina.db ]] || { echo "Missing legacy bot DB /opt/karina-bot/karina.db" >&2; exit 1; }
 [[ -d /var/www/karina/connect ]] || { echo "Missing /var/www/karina/connect" >&2; exit 1; }
+touch /opt/karina-bot/karina.db.operations.lock
+chown karina-bot:karina-bot /opt/karina-bot/karina.db.operations.lock
+chmod 0660 /opt/karina-bot/karina.db.operations.lock
 
 wrapper='#!/usr/bin/env bash
 set -Eeuo pipefail

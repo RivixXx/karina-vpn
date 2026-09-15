@@ -16,6 +16,7 @@ TASK_KEY = "payment_effects_task"
 async def delivery_loop(application):
     while True:
         try:
+            await application.bot_data["recover_paid_payments"](application)
             await application.bot_data["deliver_payment_effects"](application)
         except Exception:
             LOGGER.warning("Payment delivery cycle failed", exc_info=True)

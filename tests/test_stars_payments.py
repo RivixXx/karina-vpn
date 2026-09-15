@@ -63,3 +63,16 @@ def test_successful_stars_payment_marks_paid_and_provisions(monkeypatch):
     billing.mark_paid.assert_called_once_with("KV-ONE", "telegram_stars", "stars-charge-1")
     service.approve.assert_called_once_with("KV-ONE")
     delivery.assert_awaited_once()
+
+
+def test_paid_order_recovery_retries_only_paid_orders(monkeypatch):
+    paid = NS(id="KV-PAID", status=OrderStatus.PAID)
+    pending = NS(id="KV-PENDING", status=OrderStatus.PENDING)
+    repository = NS(recovery_orders=Mock(return_value=[paid, pending]))
+    orders = NS(approve=Mock())
+    monkeypatch.setattr(bot, "BillingRepository", lambda path: repository)
+    monkeypatch.setattr(bot, "build_customer_order_service", lambda: orders)
+    to_thread = AsyncMock(return_value=None)
+    monkeypatch.setattr(bot.asyncio, "to_thread", to_thread)
+    run(bot.recover_paid_payments(NS()))
+    to_thread.assert_awaited_once_with(orders.approve, "KV-PAID")

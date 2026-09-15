@@ -92,6 +92,9 @@ apply() {
   chmod 0770 "$BOT_DB_DIR"
   chown "$BOT_USER:$BOT_GROUP" "$BOT_DB" "$LEGAL"
   chmod 0600 "$BOT_DB" "$XUI_DB" "$LEGAL"
+  touch "$BOT_DB.operations.lock"
+  chown "$BOT_USER:$BOT_GROUP" "$BOT_DB.operations.lock"
+  chmod 0660 "$BOT_DB.operations.lock"
   install -m 0644 "$ROOT/deploy/systemd/karina-bot-hardened.service" /etc/systemd/system/karina-bot.service
   systemctl daemon-reload
   nginx -t

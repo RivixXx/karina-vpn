@@ -642,6 +642,7 @@ class ClientService:
             def synchronize_mobile(client):
                 client["expiryTime"] = target_expiry_ms
                 client["limitHwid"] = 0
+                client["enable"] = True
             try:
                 self._update(mobile_email, synchronize_mobile)
             except ClientServiceError as exc:
@@ -649,9 +650,10 @@ class ClientService:
                     "mobile expiry reconciliation failed; primary was not changed"
                 ) from exc
         try:
-            return self._update(
-                email, lambda client: client.__setitem__("expiryTime", target_expiry_ms),
-            )
+            def synchronize_primary(client):
+                client["expiryTime"] = target_expiry_ms
+                client["enable"] = True
+            return self._update(email, synchronize_primary)
         except ClientServiceError as exc:
             if mobile_exists:
                 raise ReconciliationRequiredError(
